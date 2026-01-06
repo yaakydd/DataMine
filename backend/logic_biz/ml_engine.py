@@ -19,7 +19,7 @@ from sklearn.naive_bayes import GaussianNB
 from xgboost import XGBClassifier, XGBRegressor
 import warnings
 import time
-from typing import Dict, List, Any, Optional, Tuple
+from typing import Dict, List, Any, Optional, Tuple, Union
 import json
 
 warnings.filterwarnings('ignore')
@@ -37,18 +37,31 @@ class MLEngine:
         self.df = dataframe.copy()
         self.target_column = target_column
         self.problem_type = problem_type
-        self.X = None
-        self.y = None
-        self.X_train = None
-        self.X_test = None
-        self.y_train = None
-        self.y_test = None
-        self.scaler = None
-        self.label_encoders = {}
-        self.models = {}
+        self.X: Optional[pd.DataFrame] = None
+        self.y: Optional[pd.Series] = None
+        self.X_train: Optional[pd.DataFrame] = None
+        self.X_test: Optional[pd.DataFrame] = None
+        self.y_train: Optional[pd.Series] = None
+        self.y_test: Optional[pd.Series] = None
+        self.X_train_scaled: Optional[np.ndarray] = None
+        self.X_test_scaled: Optional[np.ndarray] = None
+        self.scaler: Optional[StandardScaler] = None
+        self.label_encoders: Dict[str, LabelEncoder] = {}
+        self.models: Dict[str, Any] = {}
         
         # Prepare data
         self._prepare_data()
+    
+    def _safe_float_conversion(self, value: Any) -> float:
+        """Safely convert any value to float"""
+        try:
+            if pd.isna(value):
+                return 0.0
+            if hasattr(value, 'item'):
+                return float(value.item())
+            return float(value)
+        except (ValueError, TypeError, AttributeError):
+            return 0.0
     
     def _prepare_data(self):
         """Prepare data for ML training"""
@@ -57,7 +70,7 @@ class MLEngine:
             self.X = self.df.drop(columns=[self.target_column])
             self.y = self.df[self.target_column]
         else:
-            self.X = self.df
+            self.X = self.df.copy()
             self.y = None
         
         # Handle categorical variables
@@ -68,37 +81,61 @@ class MLEngine:
     
     def _encode_categorical(self):
         """Encode categorical variables"""
-        for column in self.X.select_dtypes(include=['object', 'category']).columns:
+        # FIX: Check if X is None
+        if self.X is None:
+            return
+        
+        # Get categorical columns safely
+        cat_cols = self.X.select_dtypes(include=['object', 'category']).columns
+        
+        for column in cat_cols:
             le = LabelEncoder()
             self.X[column] = le.fit_transform(self.X[column].astype(str))
             self.label_encoders[column] = le
         
         # Encode target for classification
         if self.problem_type == 'classification' and self.y is not None:
-            if self.y.dtype in ['object', 'category']:
+            # FIX: Use hasattr to check dtype properly
+            if hasattr(self.y, 'dtype') and self.y.dtype in ['object', 'category']:
                 le_target = LabelEncoder()
-                self.y = le_target.fit_transform(self.y)
+                self.y = pd.Series(le_target.fit_transform(self.y))
                 self.label_encoders['target'] = le_target
     
     def _handle_missing_values(self):
         """Handle missing values in features"""
+        # FIX: Check if X is None
+        if self.X is None:
+            return
+        
         # For numerical columns, fill with median
         num_cols = self.X.select_dtypes(include=[np.number]).columns
         for col in num_cols:
             if self.X[col].isnull().any():
-                self.X[col].fillna(self.X[col].median(), inplace=True)
+                median_val = self.X[col].median()
+                self.X[col].fillna(median_val, inplace=True)
         
         # For categorical columns, fill with mode
         cat_cols = self.X.select_dtypes(exclude=[np.number]).columns
         for col in cat_cols:
             if self.X[col].isnull().any():
-                self.X[col].fillna(self.X[col].mode()[0], inplace=True)
+                mode_val = self.X[col].mode()
+                if len(mode_val) > 0:
+                    self.X[col].fillna(mode_val[0], inplace=True)
     
     def analyze_for_ml(self) -> Dict[str, Any]:
         """
         Analyze dataset for ML readiness
         Returns insights and recommendations
         """
+        # FIX: Check if X is None
+        if self.X is None:
+            return {
+                "error": "Features not prepared",
+                "dataset_shape": self.df.shape,
+                "target_column": self.target_column,
+                "problem_type": self.problem_type
+            }
+        
         analysis = {
             "dataset_shape": self.df.shape,
             "target_column": self.target_column,
@@ -119,38 +156,50 @@ class MLEngine:
                 
                 # Check for class imbalance
                 if len(class_distribution) > 0:
-                    imbalance_ratio = class_distribution.max() / class_distribution.min()
-                    if imbalance_ratio > 10:
-                        analysis["issues"].append("Severe class imbalance detected")
-                        analysis["recommendations"].append("Consider using class_weight='balanced' or SMOTE")
+                    # FIX: Use safe float conversion
+                    max_val = self._safe_float_conversion(class_distribution.max())
+                    min_val = self._safe_float_conversion(class_distribution.min())
+                    if min_val > 0:
+                        imbalance_ratio = max_val / min_val
+                        if imbalance_ratio > 10:
+                            analysis["issues"].append("Severe class imbalance detected")
+                            analysis["recommendations"].append("Consider using class_weight='balanced' or SMOTE")
             
             elif self.problem_type == 'regression':
+                # FIX: Use numpy for type safety
+                y_array = np.array(self.y, dtype=float)
                 analysis["target_statistics"] = {
-                    "mean": float(self.y.mean()),
-                    "std": float(self.y.std()),
-                    "min": float(self.y.min()),
-                    "max": float(self.y.max())
+                    "mean": float(np.mean(y_array)),
+                    "std": float(np.std(y_array)),
+                    "min": float(np.min(y_array)),
+                    "max": float(np.max(y_array))
                 }
         
-        # Check for multicollinearity
-        corr_matrix = self.X.corr()
-        high_corr_pairs = []
-        for i in range(len(corr_matrix.columns)):
-            for j in range(i+1, len(corr_matrix.columns)):
-                if abs(corr_matrix.iloc[i, j]) > 0.8:
-                    high_corr_pairs.append({
-                        "feature1": corr_matrix.columns[i],
-                        "feature2": corr_matrix.columns[j],
-                        "correlation": float(corr_matrix.iloc[i, j])
-                    })
+        # Check for multicollinearity - FIX: Null check
+        if self.X is not None and len(self.X.columns) > 1:
+            corr_matrix = self.X.corr()
+            high_corr_pairs = []
+            
+            for i in range(len(corr_matrix.columns)):
+                for j in range(i+1, len(corr_matrix.columns)):
+                    corr_val = corr_matrix.iloc[i, j]
+                    # FIX: Use safe float conversion
+                    if pd.notna(corr_val):
+                        corr_float = self._safe_float_conversion(corr_val)
+                        if abs(corr_float) > 0.8:
+                            high_corr_pairs.append({
+                                "feature1": corr_matrix.columns[i],
+                                "feature2": corr_matrix.columns[j],
+                                "correlation": corr_float
+                            })
+            
+            if high_corr_pairs:
+                analysis["issues"].append("High correlation between features detected")
+                analysis["high_correlation_pairs"] = high_corr_pairs[:5]
+                analysis["recommendations"].append("Consider removing highly correlated features")
         
-        if high_corr_pairs:
-            analysis["issues"].append("High correlation between features detected")
-            analysis["high_correlation_pairs"] = high_corr_pairs[:5]  # Show top 5
-            analysis["recommendations"].append("Consider removing highly correlated features")
-        
-        # Recommend models based on problem type and data size
-        n_samples = len(self.X)
+        # Recommend models based on problem type and data size - FIX: Null check
+        n_samples = len(self.X) if self.X is not None else 0
         
         if self.problem_type == 'classification':
             if n_samples < 1000:
@@ -177,6 +226,13 @@ class MLEngine:
         Returns:
             Dictionary containing model, metrics, and training info
         """
+        # FIX: Check if X is None
+        if self.X is None:
+            return {
+                "error": "Features not prepared",
+                "model_type": model_type
+            }
+        
         # Split data
         if self.y is not None:
             self.X_train, self.X_test, self.y_train, self.y_test = train_test_split(
@@ -184,14 +240,19 @@ class MLEngine:
             )
         else:
             # For clustering, use all data
-            self.X_train = self.X
+            self.X_train = self.X.copy()
             self.X_test = None
             self.y_train = None
             self.y_test = None
         
         # Scale features
         self.scaler = StandardScaler()
-        self.X_train_scaled = self.scaler.fit_transform(self.X_train)
+        # FIX: Check for None and use proper type
+        if self.X_train is not None:
+            self.X_train_scaled = self.scaler.fit_transform(self.X_train)
+        else:
+            return {"error": "Training data not available"}
+        
         if self.X_test is not None:
             self.X_test_scaled = self.scaler.transform(self.X_test)
         
@@ -217,16 +278,21 @@ class MLEngine:
             training_time = time.time() - start_time
             
             # Make predictions
-            y_pred = model.predict(self.X_test_scaled)
-            predictions = y_pred
-            
-            # Calculate metrics
-            metrics = self._calculate_metrics(self.y_test, y_pred)
+            if self.X_test_scaled is not None and self.y_test is not None:
+                y_pred = model.predict(self.X_test_scaled)
+                predictions = y_pred
+                
+                # Calculate metrics
+                metrics = self._calculate_metrics(self.y_test, y_pred)
+            else:
+                return {"error": "Test data not available"}
         
         # Feature importance for tree-based models
         feature_importance = None
-        if hasattr(model, 'feature_importances_'):
-            importance_dict = dict(zip(self.X.columns, model.feature_importances_))
+        if hasattr(model, 'feature_importances_') and self.X is not None:
+            # FIX: Ensure feature_importances_ is converted properly
+            importances = np.array(model.feature_importances_)
+            importance_dict = dict(zip(self.X.columns, importances))
             feature_importance = sorted(importance_dict.items(), key=lambda x: x[1], reverse=True)[:10]
         
         # Store model
@@ -247,46 +313,76 @@ class MLEngine:
     
     def _get_model(self, model_type: str, hyperparams: Dict) -> Any:
         """Get model instance based on type"""
+        # Default hyperparameters
+        default_hyperparams = {
+            'random_state': 42,
+            'n_estimators': 100
+        }
+        
+        # Merge with provided hyperparams
+        final_hyperparams = {**default_hyperparams, **hyperparams}
+        
         model_map = {
             'classification': {
-                'logistic_regression': LogisticRegression(**hyperparams),
-                'random_forest': RandomForestClassifier(**hyperparams),
-                'decision_tree': DecisionTreeClassifier(**hyperparams),
-                'svm': SVC(**hyperparams),
-                'xgboost': XGBClassifier(**hyperparams),
-                'naive_bayes': GaussianNB(**hyperparams)
+                'logistic_regression': LogisticRegression,
+                'random_forest': RandomForestClassifier,
+                'decision_tree': DecisionTreeClassifier,
+                'svm': SVC,
+                'xgboost': XGBClassifier,
+                'naive_bayes': GaussianNB
             },
             'regression': {
-                'linear_regression': LinearRegression(**hyperparams),
-                'random_forest': RandomForestRegressor(**hyperparams),
-                'decision_tree': DecisionTreeRegressor(**hyperparams),
-                'svr': SVR(**hyperparams),
-                'xgboost': XGBRegressor(**hyperparams)
+                'linear_regression': LinearRegression,
+                'random_forest': RandomForestRegressor,
+                'decision_tree': DecisionTreeRegressor,
+                'svr': SVR,
+                'xgboost': XGBRegressor
             },
             'clustering': {
-                'kmeans': KMeans(**hyperparams),
-                'dbscan': DBSCAN(**hyperparams)
+                'kmeans': KMeans,
+                'dbscan': DBSCAN
             }
         }
         
         model_key = model_type.lower().replace(" ", "_")
-        return model_map[self.problem_type].get(model_key, model_map[self.problem_type]['random_forest'])
+        model_class = model_map.get(self.problem_type, {}).get(
+            model_key, 
+            model_map[self.problem_type].get('random_forest', RandomForestClassifier)
+        )
+        
+        # Handle models that don't accept certain parameters
+        try:
+            if model_key == 'linear_regression':
+                return model_class()
+            elif model_key == 'naive_bayes':
+                return model_class()
+            else:
+                return model_class(**final_hyperparams)
+        except Exception as e:
+            # Fallback to default model
+            return model_class()
     
-    def _calculate_metrics(self, y_true, y_pred) -> Dict[str, float]:
+    def _calculate_metrics(self, y_true: Union[pd.Series, np.ndarray], 
+                          y_pred: np.ndarray) -> Dict[str, float]:
         """Calculate appropriate metrics based on problem type"""
+        # Convert to numpy arrays for type safety
+        y_true_arr = np.array(y_true)
+        y_pred_arr = np.array(y_pred)
+        
         if self.problem_type == 'classification':
             return {
-                "accuracy": float(accuracy_score(y_true, y_pred)),
-                "precision": float(precision_score(y_true, y_pred, average='weighted', zero_division=0)),
-                "recall": float(recall_score(y_true, y_pred, average='weighted', zero_division=0)),
-                "f1_score": float(f1_score(y_true, y_pred, average='weighted', zero_division=0))
+                "accuracy": float(accuracy_score(y_true_arr, y_pred_arr)),
+                "precision": float(precision_score(y_true_arr, y_pred_arr, average='weighted', zero_division=0)),
+                "recall": float(recall_score(y_true_arr, y_pred_arr, average='weighted', zero_division=0)),
+                "f1_score": float(f1_score(y_true_arr, y_pred_arr, average='weighted', zero_division=0))
             }
         elif self.problem_type == 'regression':
+            mse = mean_squared_error(y_true_arr, y_pred_arr)
             return {
-                "mse": float(mean_squared_error(y_true, y_pred)),
-                "rmse": float(np.sqrt(mean_squared_error(y_true, y_pred))),
-                "r2": float(r2_score(y_true, y_pred)),
-                "mae": float(np.mean(np.abs(y_true - y_pred)))
+                "mse": float(mse),
+                "rmse": float(np.sqrt(mse)),
+                "r2": float(r2_score(y_true_arr, y_pred_arr)),
+                "mae": float(np.mean(np.abs(y_true_arr - y_pred_arr)))
             }
         return {}
     
@@ -302,11 +398,14 @@ class MLEngine:
             try:
                 result = self.train_model(model_type, test_size=0.2, random_state=42)
                 
+                if "error" in result:
+                    continue
+                
                 model_info = {
                     "model_type": model_type,
                     "metrics": result["metrics"],
                     "training_time": result["training_time"],
-                    "hyperparameters": result["hyperparameters"]
+                    "hyperparameters": result.get("hyperparameters", {})
                 }
                 
                 comparison["models"].append(model_info)
@@ -316,7 +415,7 @@ class MLEngine:
                 current_score = result["metrics"].get(score_key, -float('inf'))
                 
                 if current_score > comparison["best_score"]:
-                    comparison["best_score"] = current_score
+                    comparison["best_score"] = float(current_score)
                     comparison["best_model"] = model_type
                     comparison["best_model_reason"] = f"Highest {score_key}: {current_score:.3f}"
                     
@@ -326,7 +425,7 @@ class MLEngine:
         
         return comparison
     
-    def predict(self, model, new_data: pd.DataFrame):
+    def predict(self, model: Any, new_data: pd.DataFrame) -> np.ndarray:
         """Make predictions on new data"""
         # Preprocess new data
         new_data_processed = new_data.copy()
@@ -334,20 +433,28 @@ class MLEngine:
         # Apply same preprocessing
         for column, encoder in self.label_encoders.items():
             if column in new_data_processed.columns and column != 'target':
-                new_data_processed[column] = encoder.transform(new_data_processed[column].astype(str))
+                try:
+                    new_data_processed[column] = encoder.transform(new_data_processed[column].astype(str))
+                except Exception:
+                    # Handle unseen labels
+                    new_data_processed[column] = encoder.transform(
+                        new_data_processed[column].astype(str).apply(
+                            lambda x: x if x in encoder.classes_ else encoder.classes_[0]
+                        )
+                    )
         
         # Scale features
         if self.scaler:
             new_data_scaled = self.scaler.transform(new_data_processed)
         else:
-            new_data_scaled = new_data_processed
+            new_data_scaled = new_data_processed.values
         
         # Make predictions
         predictions = model.predict(new_data_scaled)
         
         return predictions
     
-    def get_test_data(self):
+    def get_test_data(self) -> Optional[pd.DataFrame]:
         """Get test data for example predictions"""
         if self.X_test is not None:
             test_df = self.X_test.copy()
@@ -379,6 +486,17 @@ class MLEngine:
             options["recommendations"] = [
                 "Good for binary classification problems",
                 "Fast and interpretable"
+            ]
+        
+        elif model_type == "XGBoost":
+            options["hyperparameters"] = {
+                "n_estimators": "Number of boosting rounds (default: 100)",
+                "learning_rate": "Step size (default: 0.3)",
+                "max_depth": "Maximum tree depth (default: 6)"
+            }
+            options["recommendations"] = [
+                "Best for competition-level accuracy",
+                "Handles missing values automatically"
             ]
         
         return options
