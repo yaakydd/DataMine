@@ -10,8 +10,8 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from logic_biz.data_validator import DataValidator
 from logic_biz.data_quality_checker import DataCleaner
 
-# Import the uploaded_datasets storage from upload.py
-from routes.upload import uploaded_datasets
+# Import the centralized storage
+from storage.datasets import DatasetStorage
 
 # Create router
 router = APIRouter()
@@ -37,7 +37,9 @@ async def validate_dataset(dataset_id: str) -> Dict[str, Any]:
     """
     
     # Check if dataset exists
-    if dataset_id not in uploaded_datasets:
+    # Get the dataset
+    dataset = DatasetStorage.get_dataset(dataset_id)
+    if not dataset:
         raise HTTPException(
             status_code=404,
             detail={
@@ -49,8 +51,7 @@ async def validate_dataset(dataset_id: str) -> Dict[str, Any]:
             }
         )
     
-    # Get the dataset
-    df = uploaded_datasets[dataset_id]["dataframe"]
+    df = dataset["dataframe"]
     
     # Run validation
     validator = DataValidator(df)
@@ -97,18 +98,20 @@ async def remove_duplicates(
         This removes rows with duplicate email+phone combinations
     """
     
-    if dataset_id not in uploaded_datasets:
+    dataset = DatasetStorage.get_dataset(dataset_id)
+    if not dataset:
         raise HTTPException(status_code=404, detail="Dataset not found")
     
-    df = uploaded_datasets[dataset_id]["dataframe"]
+    df = dataset["dataframe"]
     
     # Create cleaner and remove duplicates
     cleaner = DataCleaner(df)
     result = cleaner.remove_duplicates(subset=subset)
     
     # Update stored dataset with cleaned version
-    uploaded_datasets[dataset_id]["dataframe"] = cleaner.get_cleaned_data()
-    uploaded_datasets[dataset_id]["rows"] = len(cleaner.get_cleaned_data())
+    dataset["dataframe"] = cleaner.get_cleaned_data()
+    dataset["rows"] = len(cleaner.get_cleaned_data())
+    DatasetStorage.save_dataset(dataset_id, dataset)
     
     return {
         "success": True,
@@ -152,10 +155,11 @@ async def fill_missing_values(
         This fills missing ages with the average age
     """
     
-    if dataset_id not in uploaded_datasets:
+    dataset = DatasetStorage.get_dataset(dataset_id)
+    if not dataset:
         raise HTTPException(status_code=404, detail="Dataset not found")
     
-    df = uploaded_datasets[dataset_id]["dataframe"]
+    df = dataset["dataframe"]
     
     # Validate column exists
     if column not in df.columns:
@@ -185,7 +189,8 @@ async def fill_missing_values(
     result = cleaner.fill_missing_values(column, method, custom_value)
     
     # Update stored dataset
-    uploaded_datasets[dataset_id]["dataframe"] = cleaner.get_cleaned_data()
+    dataset["dataframe"] = cleaner.get_cleaned_data()
+    DatasetStorage.save_dataset(dataset_id, dataset)
     
     return {
         "success": True,
@@ -228,10 +233,11 @@ async def remove_outliers(
         This removes salary values that are way outside normal range
     """
     
-    if dataset_id not in uploaded_datasets:
+    dataset = DatasetStorage.get_dataset(dataset_id)
+    if not dataset:
         raise HTTPException(status_code=404, detail="Dataset not found")
     
-    df = uploaded_datasets[dataset_id]["dataframe"]
+    df = dataset["dataframe"]
     
     # Validate column exists
     if column not in df.columns:
@@ -258,8 +264,9 @@ async def remove_outliers(
     result = cleaner.remove_outliers(column, method, threshold)
     
     # Update stored dataset
-    uploaded_datasets[dataset_id]["dataframe"] = cleaner.get_cleaned_data()
-    uploaded_datasets[dataset_id]["rows"] = len(cleaner.get_cleaned_data())
+    dataset["dataframe"] = cleaner.get_cleaned_data()
+    dataset["rows"] = len(cleaner.get_cleaned_data())
+    DatasetStorage.save_dataset(dataset_id, dataset)
     
     return {
         "success": True,
@@ -300,10 +307,11 @@ async def standardize_text(
         This converts "  USA  " to "usa" (lowercase and trim spaces)
     """
     
-    if dataset_id not in uploaded_datasets:
+    dataset = DatasetStorage.get_dataset(dataset_id)
+    if not dataset:
         raise HTTPException(status_code=404, detail="Dataset not found")
     
-    df = uploaded_datasets[dataset_id]["dataframe"]
+    df = dataset["dataframe"]
     
     if column not in df.columns:
         raise HTTPException(status_code=400, detail=f"Column '{column}' not found")
@@ -327,7 +335,8 @@ async def standardize_text(
     result = cleaner.standardize_text(column, operations)
     
     # Update stored dataset
-    uploaded_datasets[dataset_id]["dataframe"] = cleaner.get_cleaned_data()
+    dataset["dataframe"] = cleaner.get_cleaned_data()
+    DatasetStorage.save_dataset(dataset_id, dataset)
     
     return {
         "success": True,
@@ -367,10 +376,11 @@ async def convert_data_type(
         This converts age from text "25" to number 25
     """
     
-    if dataset_id not in uploaded_datasets:
+    dataset = DatasetStorage.get_dataset(dataset_id)
+    if not dataset:
         raise HTTPException(status_code=404, detail="Dataset not found")
     
-    df = uploaded_datasets[dataset_id]["dataframe"]
+    df = dataset["dataframe"]
     
     if column not in df.columns:
         raise HTTPException(status_code=400, detail=f"Column '{column}' not found")
@@ -392,7 +402,8 @@ async def convert_data_type(
     result = cleaner.convert_data_type(column, target_type)
     
     # Update stored dataset
-    uploaded_datasets[dataset_id]["dataframe"] = cleaner.get_cleaned_data()
+    dataset["dataframe"] = cleaner.get_cleaned_data()
+    DatasetStorage.save_dataset(dataset_id, dataset)
     
     return {
         "success": True,
@@ -427,19 +438,22 @@ async def remove_low_variance_columns(
         This removes columns where values barely vary
     """
     
-    if dataset_id not in uploaded_datasets:
+    dataset = DatasetStorage.get_dataset(dataset_id)
+    if not dataset:
         raise HTTPException(status_code=404, detail="Dataset not found")
     
-    df = uploaded_datasets[dataset_id]["dataframe"]
+    df = dataset["dataframe"]
     
     # Remove low variance columns
     cleaner = DataCleaner(df)
     result = cleaner.remove_low_variance_columns(threshold)
     
     # Update stored dataset
-    uploaded_datasets[dataset_id]["dataframe"] = cleaner.get_cleaned_data()
-    uploaded_datasets[dataset_id]["columns"] = len(cleaner.get_cleaned_data().columns)
-    uploaded_datasets[dataset_id]["column_names"] = list(cleaner.get_cleaned_data().columns)
+    # Update stored dataset
+    dataset["dataframe"] = cleaner.get_cleaned_data()
+    dataset["columns"] = len(cleaner.get_cleaned_data().columns)
+    dataset["column_names"] = list(cleaner.get_cleaned_data().columns)
+    DatasetStorage.save_dataset(dataset_id, dataset)
     
     return {
         "success": True,
@@ -465,10 +479,11 @@ async def get_cleaning_log(dataset_id: str) -> Dict[str, Any]:
         List of all cleaning operations with explanations
     """
     
-    if dataset_id not in uploaded_datasets:
+    dataset = DatasetStorage.get_dataset(dataset_id)
+    if not dataset:
         raise HTTPException(status_code=404, detail="Dataset not found")
     
-    df = uploaded_datasets[dataset_id]["dataframe"]
+    df = dataset["dataframe"]
     
     # Create cleaner to access log (empty log if no operations yet)
     cleaner = DataCleaner(df)
@@ -497,10 +512,11 @@ async def get_cleaning_summary(dataset_id: str) -> Dict[str, Any]:
     Shows how many operations were done and final dataset size.
     """
     
-    if dataset_id not in uploaded_datasets:
+    dataset = DatasetStorage.get_dataset(dataset_id)
+    if not dataset:
         raise HTTPException(status_code=404, detail="Dataset not found")
     
-    df = uploaded_datasets[dataset_id]["dataframe"]
+    df = dataset["dataframe"]
     
     cleaner = DataCleaner(df)
     summary = cleaner.export_summary()
@@ -535,10 +551,11 @@ async def download_cleaned_data(
         Download link or file data
     """
     
-    if dataset_id not in uploaded_datasets:
+    dataset = DatasetStorage.get_dataset(dataset_id)
+    if not dataset:
         raise HTTPException(status_code=404, detail="Dataset not found")
     
-    df = uploaded_datasets[dataset_id]["dataframe"]
+    df = dataset["dataframe"]
     
     # For now, return preview and info
     # In production, this would return actual file download

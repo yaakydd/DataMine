@@ -1,5 +1,5 @@
 from fastapi import APIRouter, HTTPException
-from routes.upload import uploaded_datasets
+from storage.datasets import DatasetStorage
 from routes.EDA import DataAnalyzer, pd
 
 router = APIRouter()
@@ -9,10 +9,10 @@ async def analyze_dataset(dataset_id: str):
     """
     Perform full EDA on a specific dataset.
     """
-    if dataset_id not in uploaded_datasets:
+    dataset_info = DatasetStorage.get_dataset(dataset_id)
+    if not dataset_info:
         raise HTTPException(status_code=404, detail="Dataset not found")
     
-    dataset_info = uploaded_datasets[dataset_id]
     df = dataset_info["dataframe"]
     
     # Initialize analyzer

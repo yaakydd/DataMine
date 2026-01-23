@@ -1,6 +1,7 @@
 import { useState, useRef } from 'react';
 import { UploadCloud, File, AlertCircle, CheckCircle2, Loader2 } from 'lucide-react';
 import { cn } from '../../utils/cn';
+import { api } from '../../utils/api';
 
 interface UploadResponse {
   success: boolean;
@@ -77,17 +78,7 @@ export default function UploadArea({ onUploadSuccess }: UploadAreaProps) {
     formData.append('file', file);
 
     try {
-      const response = await fetch('/api/upload', {
-        method: 'POST',
-        body: formData,
-      });
-
-      const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(data.detail?.explanation || "Upload failed");
-      }
-
+      const data = await api.uploadDataset(file);
       onUploadSuccess(data);
     } catch (err: any) {
       setError(err.message || "Failed to upload file");

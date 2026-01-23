@@ -1,7 +1,10 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useCallback } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { Loader2 } from 'lucide-react';
 import AnalysisDashboard from '../components/Visualization/AnalysisDashboard';
+import QuickActionsPanel from '../components/QuickActions/QuickActionsPanel';
+import HistoryTimeline from '../components/History/HistoryTimeline';
+import { api } from '../utils/api';
 
 export default function AnalysisPage() {
   const location = useLocation();
@@ -12,33 +15,34 @@ export default function AnalysisPage() {
 
   const dataset = location.state?.dataset;
 
+  const fetchAnalysis = useCallback(async () => {
+    if (!dataset?.dataset_id) return;
+    try {
+      setLoading(true);
+      const data = await api.analyzeDataset(dataset.dataset_id);
+      setAnalysisData(data);
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  }, [dataset?.dataset_id]);
+
   useEffect(() => {
     if (!dataset?.dataset_id) {
-       // If came here directly, maybe redirect or show empty
        setLoading(false);
        return;
     }
-
-    const fetchAnalysis = async () => {
-      try {
-        setLoading(true);
-        const response = await fetch(`/api/analyze/${dataset.dataset_id}`);
-        const data = await response.json();
-        
-        if (!response.ok) {
-          throw new Error(data.detail || "Analysis failed");
-        }
-
-        setAnalysisData(data);
-      } catch (err: any) {
-        setError(err.message);
-      } finally {
-        setLoading(false);
-      }
-    };
-
     fetchAnalysis();
-  }, [dataset]);
+  }, [dataset, fetchAnalysis]);
+
+  const handleActionComplete = (result: any) => {
+      alert(result.result.message || "Action completed!");
+      if (result.action === 'clean') {
+          // Re-analyze data to update charts
+          fetchAnalysis();
+      }
+  };
 
   if (!dataset?.dataset_id) {
     return (
@@ -91,12 +95,19 @@ export default function AnalysisPage() {
         </div>
       </div>
 
+      <QuickActionsPanel 
+        datasetId={dataset.dataset_id} 
+        onActionComplete={handleActionComplete} 
+      />
+
       {analysisData && (
         <AnalysisDashboard 
           report={analysisData.report} 
           visualizations={analysisData.visualizations.visualization_data} 
         />
       )}
+
+      <HistoryTimeline datasetId={dataset.dataset_id} />
     </div>
   );
 }
