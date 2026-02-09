@@ -1,4 +1,4 @@
-from fastapi import FastAPI, File, UploadFile, APIRouter
+from fastapi import File, UploadFile, APIRouter
 import pandas as pd
 
 """
@@ -27,6 +27,6 @@ def upload_file(file : UploadFile):
         "shape" : df.shape,
         "columns" : df.columns.tolist(),
         "numerical_columns_statistics": df.describe().to_dict(),
-        "df_info": df.info()
+        "column_datatypes": df.dtypes.astype(str).to_dict(),
     }
 
