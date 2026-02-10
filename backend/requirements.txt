@@ -9,4 +9,4 @@ xgboost
 joblib
 pyarrow
 avro-python3
-
+openpyxl
