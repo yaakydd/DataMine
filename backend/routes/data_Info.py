@@ -42,8 +42,11 @@ async def upload_file(file: UploadFile = File(...)):
         elif filename.endswith((".xlsx", ".xls")):
             df = pd.read_excel(file_memory_buffer, engine='openpyxl')
         elif filename.endswith(".parquet") or "parquet" in file.content_type:
-            # Explicitly use pyarrow to avoid engine errors
+            # Explicitly using pyarrow to avoid engine errors
             df = pd.read_parquet(file_memory_buffer, engine='pyarrow')
+       elif filename.endswith(".orc") or file.content_type == "application/vnd.apache.orc":
+           # Using pyarrow as the default engine for ORC files
+       df = pd.read_orc(file_memory_buffer)
         else:
             raise HTTPException(status_code=400, detail=f"Unsupported file type: {file.content_type}")
 
@@ -55,7 +58,7 @@ async def upload_file(file: UploadFile = File(...)):
         # To know how much RAM python is using to hold your data.
         file_size = df.memory_usage(deep=True).sum() #deep=True tells pandas to get the actual sizes of all the strings in the column in the dataframe. 
         
-        # COnverting the RAM size of your data into Megabytes
+        # Converting the RAM size of your data into Megabytes
         filesize_in_mb = f"{round(file_size / (1024 * 1024), 2)} MB"
 
         # Displays the basic information about the datset.
