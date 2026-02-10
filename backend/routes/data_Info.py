@@ -23,23 +23,55 @@ in a variable called df and returns some basic information
 about the dataset such as the file name
 """
 
-
+# Validate file extension and content type
 @data_info.post("/dataset_info")
 async def upload_file(file: UploadFile = File(...)):
-    # Validate file extension and content type
-    if file.content_type == "application/json":
-        content = await file.read()
-        try:
-            df = pd.read_json(io.BytesIO(content))
-            return{
-        "filename" : file.filename,
-        "first_five_rows" : df.head().to_dict(),
-        "shape" : df.shape,
-        "columns" : df.columns.tolist(),
-        "numerical_columns_statistics": df.describe().to_dict(),
-        "column_datatypes": df.dtypes.astype(str).to_dict(),
-    }
-        except Exception as e:
-            raise HTTPException(status_code=400, detail=f"Invalid JSON: {e}")
+    # Checking for file name
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="File has no name")
+    # Converting filenames into lowercase for consistency
+    file.filename = file.filename.lower()
+    file_content = await file.read() #Awaits for the file to be read before storesd in file_content
+    file_memory_buffer = io.BytesIO(file_content) #Reads the stores the memory as a buffer(temporarily)
+    
+    try:
+        # Identifying the various file formats and loading it 
+        if file.content_type == "text/csv":
+            df = pd.read_csv(file_memory_buffer, sep=',')
+        elif file.content_type == "text/tab-separated-values":
+            df = pd.read_csv(file_memory_buffer, sep='\t')
+        elif file.content_type == "application/json": 
+            df = pd.read_json(file_memory_buffer)
+        elif file.content_type == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":
+            df = pd.read_excel(file_memory_buffer, engine='openpyxl')
+        elif file.content_type == "application/octet-stream":
+            df = pd.read_parquet(file_memory_buffer)
+        elif file.content_type == "application/vnd.apache.orc":
+            df = pd.read_orc(file_memory_buffer)
+        else:
+            raise HTTPException(status_code=400, detail=f"Unsupported file type: {file.content_type}")
 
+        # Storing the .info() in a buffer
+        buffer = io.StringIO()
+        df.info(buf=buffer)
+        data_info = buffer.getvalue()
 
+        # To know how much RAM python is using to hold your data.
+        file_size = df.memory_usage(deep=True).sum() #deep=True tells pandas to get the actual sizes of all the strings in the column in the dataframe. 
+        
+        # COnverting the RAM size of your data into Megabytes
+        filesize_in_mb = f"{round(file_size / (1024 * 1024), 2)} MB"
+
+        # Displays the basic information about the datset.
+        return {
+            "filename": file.filename,
+            "file_size": filesize_in_mb,
+            "shape": df.shape,
+            "columns": df.columns.tolist(),
+            "first_five_rows": df.head().to_dict(),
+            "numerical_columns_statistics": df.describe().to_dict(),
+            "df_info": data_info
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Error processing file: {str(e)}")

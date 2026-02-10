@@ -1,5 +1,5 @@
 from fastapi import FastAPI
-from backend.routes.data_Info import data_info
+from routes.data_Info import data_info
 
 app = FastAPI(title="DataMine API")
 
