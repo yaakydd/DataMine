@@ -1,5 +1,11 @@
-from fastapi import File, UploadFile, APIRouter
+from fastapi import File, UploadFile, APIRouter, HTTPException
 import pandas as pd
+from pydantic import BaseModel
+import pandas as pd
+import io
+import pyarrow.parquet as pq
+import avro.schema
+from avro.datafile import DataFileReader
 
 """
 APIRouter acts as the blueprint used to group the related endpoints in this file.
@@ -19,8 +25,15 @@ about the dataset such as the file name
 
 
 @data_info.post("/dataset_info")
-def upload_file(file : UploadFile):
-    df = pd.read_csv(file.file)
+async def upload_file(file: UploadFile = File(...)):
+    # Validate file extension and content type
+    if file.content_type == "application/json":
+        content = await file.read()
+        try:
+            data = pd.read_json(io.BytesIO(content))
+            return {"file_type": "json", "data": data.to_dict()}
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Invalid JSON: {e}")
     return{
         "filename" : file.filename,
         "first_five_rows" : df.head().to_dict(),
