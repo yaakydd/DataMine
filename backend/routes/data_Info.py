@@ -30,11 +30,8 @@ async def upload_file(file: UploadFile = File(...)):
     if file.content_type == "application/json":
         content = await file.read()
         try:
-            data = pd.read_json(io.BytesIO(content))
-            return {"file_type": "json", "data": data.to_dict()}
-        except Exception as e:
-            raise HTTPException(status_code=400, detail=f"Invalid JSON: {e}")
-    return{
+            df = pd.read_json(io.BytesIO(content))
+            return{
         "filename" : file.filename,
         "first_five_rows" : df.head().to_dict(),
         "shape" : df.shape,
@@ -42,4 +39,7 @@ async def upload_file(file: UploadFile = File(...)):
         "numerical_columns_statistics": df.describe().to_dict(),
         "column_datatypes": df.dtypes.astype(str).to_dict(),
     }
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Invalid JSON: {e}")
+
 

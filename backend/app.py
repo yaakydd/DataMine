@@ -1,5 +1,5 @@
 from fastapi import FastAPI
-from routes.Data_Info import data_info
+from backend.routes.data_Info import data_info
 
 app = FastAPI()
 
