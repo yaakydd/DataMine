@@ -1,11 +1,8 @@
 from fastapi import File, UploadFile, APIRouter, HTTPException
 import pandas as pd
-from pydantic import BaseModel
 import pandas as pd
 import io
 import pyarrow.parquet as pq
-import avro.schema
-from avro.datafile import DataFileReader
 
 """
 APIRouter acts as the blueprint used to group the related endpoints in this file.
@@ -35,23 +32,22 @@ async def upload_file(file: UploadFile = File(...)):
     file_memory_buffer = io.BytesIO(file_content) #Reads the stores the memory as a buffer(temporarily)
     
     try:
-        # Identifying the various file formats and loading it 
-        if file.content_type == "text/csv":
+        # Identifying the various file formats and loading it into a Dataframe and stored in the variable called df
+        if filename.endswith(".csv") or file.content_type == "text/csv":
             df = pd.read_csv(file_memory_buffer, sep=',')
-        elif file.content_type == "text/tab-separated-values":
+        elif filename.endswith(".tsv") or file.content_type == "text/tab-separated-values":
             df = pd.read_csv(file_memory_buffer, sep='\t')
-        elif file.content_type == "application/json": 
+        elif filename.endswith(".json") or file.content_type == "application/json": 
             df = pd.read_json(file_memory_buffer)
-        elif file.content_type == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":
+        elif filename.endswith((".xlsx", ".xls")):
             df = pd.read_excel(file_memory_buffer, engine='openpyxl')
-        elif file.content_type == "application/octet-stream":
-            df = pd.read_parquet(file_memory_buffer)
-        elif file.content_type == "application/vnd.apache.orc":
-            df = pd.read_orc(file_memory_buffer)
+        elif filename.endswith(".parquet") or "parquet" in file.content_type:
+            # Explicitly use pyarrow to avoid engine errors
+            df = pd.read_parquet(file_memory_buffer, engine='pyarrow')
         else:
             raise HTTPException(status_code=400, detail=f"Unsupported file type: {file.content_type}")
 
-        # Storing the .info() in a buffer
+        # Processing the metadata to be stored
         buffer = io.StringIO()
         df.info(buf=buffer)
         data_info = buffer.getvalue()
