@@ -9,4 +9,3 @@ xgboost
 joblib
 pyarrow
 fastavro
-avro-python3
