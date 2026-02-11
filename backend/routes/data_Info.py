@@ -61,6 +61,10 @@ async def upload_file(file: UploadFile = File(...)):
         # Converting the RAM size of your data into Megabytes
         filesize_in_mb = f"{round(file_size / (1024 * 1024), 2)} MB"
 
+        numerical_column_stats = df.describe(include=[object])
+
+        categorical_column_stats = df.describe(include=['object'])
+
         # Displays the basic information about the datset.
         return {
             "filename": filename,
@@ -68,7 +72,8 @@ async def upload_file(file: UploadFile = File(...)):
             "shape": df.shape,
             "columns": df.columns.tolist(),
             "first_five_rows": df.head().fillna("NaN").to_dict(),
-            "statistics": df.describe(include='all').fillna("NaN").to_dict(), # This ensures you always get data back, even if there are no numbers if your dataset only contains strings
+            "numeric_statistics": numerical_column_stats.fillna(0).to_dict(),
+            "categorical_statistics": categorical_column_stats.fillna("NaN").to_dict(), # This ensures you always get data back, even if there are no numbers if your dataset only contains strings
             "df_info": info_data
         }
 
