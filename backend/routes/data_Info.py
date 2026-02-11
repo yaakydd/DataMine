@@ -1,6 +1,7 @@
 from fastapi import File, UploadFile, APIRouter, HTTPException
 import pandas as pd
 import io
+import json
 import pyarrow.parquet as pq
 
 """
@@ -34,12 +35,14 @@ async def upload_file(file: UploadFile = File(...)):
     
         # Identifying the various file formats and loading it into a Dataframe and stored in the variable called df
         if filename.endswith(".csv") or file.content_type == "text/csv":
-            df = pd.read_csv(file_memory_buffer, sep=',')
+            # Using engine='python' and on_bad_lines to handle formatting irregularities in CSVs
+            df = pd.read_csv(file_memory_buffer, sep=',', engine='python', on_bad_lines='skip')
         elif filename.endswith(".tsv") or file.content_type == "text/tab-separated-values":
-            df = pd.read_csv(file_memory_buffer, sep='\t')
+            df = pd.read_csv(file_memory_buffer, sep='\t', engine='python')
         elif filename.endswith(".json") or file.content_type == "application/json": 
             df = pd.read_json(file_memory_buffer)
         elif filename.endswith((".xlsx", ".xls")):
+            # Uses openpyxl to read Excel files; defaults to the first sheet
             df = pd.read_excel(file_memory_buffer, engine='openpyxl')
         elif filename.endswith(".parquet") or file.content_type == "application/vnd.apache.parquet":
             # Explicitly using pyarrow to avoid engine errors
@@ -61,9 +64,17 @@ async def upload_file(file: UploadFile = File(...)):
         # Converting the RAM size of your data into Megabytes
         filesize_in_mb = f"{round(file_size / (1024 * 1024), 2)} MB"
 
-        numerical_column_stats = df.describe(include=[object])
+        # Separate numeric and categorical columns to provide accurate statistical summaries
+        numerical_df = df.select_dtypes(include=['number'])
+        categorical_df = df.select_dtypes(include=['object', 'category'])
 
-        categorical_column_stats = df.describe(include=['object'])
+        # Sanitize complex types (like dates or decimals found in Parquet/ORC) for JSON compatibility
+        # We use json.loads(df.to_json()) because Pandas handles NaN and Inf much better than the standard JSON library
+        first_five = json.loads(df.head().to_json(orient='records'))
+        
+        # Calculate stats and replace invalid JSON values with readable strings or zeros
+        numeric_stats = json.loads(numerical_df.describe().fillna(0).to_json())
+        category_stats = json.loads(categorical_df.describe().fillna("NaN").to_json())
 
         # Displays the basic information about the datset.
         return {
@@ -71,9 +82,9 @@ async def upload_file(file: UploadFile = File(...)):
             "file_size": filesize_in_mb,
             "shape": df.shape,
             "columns": df.columns.tolist(),
-            "first_five_rows": df.head().fillna("NaN").to_dict(),
-            "numeric_statistics": numerical_column_stats.fillna(0).to_dict(),
-            "categorical_statistics": categorical_column_stats.fillna("NaN").to_dict(), # This ensures you always get data back, even if there are no numbers if your dataset only contains strings
+            "first_five_rows": first_five,
+            "numeric_statistics": numeric_stats,
+            "categorical_statistics": category_stats, 
             "df_info": info_data
         }
 
