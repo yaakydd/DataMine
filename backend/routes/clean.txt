@@ -1,0 +1,68 @@
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
+from typing import Dict
+import pandas as pd
+import re
+from routes.dfState import dataset_state
+
+clean = APIRouter()
+
+# 1. The Schema for user corrections
+class ColumnUpdate(BaseModel):
+    # Frontend sends: {"corrections": {"salary_": "float", "age": "int"}}
+    corrections: Dict[str, str]
+
+@clean.post("/dataset_cleaning")
+async def process_and_verify_data(update_data: ColumnUpdate = None):
+    # --- STEP 1: THE GATEKEEPER CHECK ---
+    if dataset_state.df is None:
+        raise HTTPException(status_code=400, detail="No dataset loaded in state.")
+
+    df = dataset_state.df
+
+    try:
+        # --- STEP 2: SANITIZE COLUMN NAMES ---
+        # This fixes spaces, symbols ($, %, !), and casing automatically
+        clean_names = []
+        for col in df.columns:
+            c = str(col).strip().lower().replace(" ", "_")
+            c = re.sub(r'[^a-z0-9_]', '', c) # Regex: keep only letters, numbers, underscores
+            clean_names.append(c)
+        df.columns = clean_names
+
+        # --- STEP 3: APPLY USER CORRECTIONS ---
+        # Only runs if the user sent a 'corrections' dictionary
+        if update_data and update_data.corrections:
+            for col_name, target_type in update_data.corrections.items():
+                if col_name in df.columns:
+                    if target_type == "int":
+                        # errors='coerce' turns bad data into NaN instead of crashing
+                        df[col_name] = pd.to_numeric(df[col_name], errors='coerce').astype('Int64')
+                    elif target_type == "float":
+                        df[col_name] = pd.to_numeric(df[col_name], errors='coerce')
+                    elif target_type == "string":
+                        df[col_name] = df[col_name].astype(str)
+                    elif target_type == "datetime":
+                        df[col_name] = pd.to_datetime(df[col_name], errors='coerce')
+
+        # --- STEP 4: SAVE THE STATE ---
+        dataset_state.df = df
+
+        # --- STEP 5: REPRINT FOR USER VERIFICATION ---
+        # We use .apply(lambda x: x.name) to make the types JSON-friendly
+        column_report = []
+        for col in df.columns:
+            column_report.append({
+                "column_name": col,
+                "datatype": str(df[col].dtype),
+                "null_values": int(df[col].isnull().sum())
+            })
+
+        return {
+            "status": "success",
+            "message": "Data processed and state updated",
+            "column_data": column_report
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Cleaning Logic Error: {str(e)}")

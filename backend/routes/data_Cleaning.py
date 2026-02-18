@@ -1,6 +1,7 @@
 from fastapi import FastAPI, HTTPException, APIRouter
-import pandas as pd
 from .dfState import dataset_state
+import pandas as pd
+import re
 
 
 clean = APIRouter()
@@ -14,8 +15,9 @@ async def wrong_datatypes_cleaning():
 
     try:   
         clean_df = dataset_state.df
-        #Identifying the column datatypes
-        column_datatypes = clean_df.dtypes
+      # Convert the dtypes to strings, then to a dictionary
+      # This is how it works: Goes through the list one-by-one(.apply(...)), A placeholder that says: "For each item in the list, call it 'x' for a second." lambda x: and The action: "Look at item 'x' and grab only its 'name' property." (x.name) only refers to the values{int64...} not the labels{column_name}.
+        column_datatypes = clean_df.dtypes.apply(lambda x: x.name).to_dict()
         return {
             'Column_Datatpes' : column_datatypes
         }
