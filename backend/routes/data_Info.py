@@ -1,8 +1,10 @@
 from fastapi import File, UploadFile, APIRouter, HTTPException
+from dfState import df_state
 import pandas as pd
 import io
 import json
 import pyarrow.parquet as pq
+
 
 """
 APIRouter acts as the blueprint used to group the related endpoints in this file.
@@ -53,6 +55,8 @@ async def upload_file(file: UploadFile = File(...)):
         else:
             raise HTTPException(status_code=400, detail=f"Unsupported file type: {file.content_type}")
 
+        df_state.df = df  # Storing the DataFrame in the global state for access across endpoints
+        
         # Processing the metadata to be stored
         buffer = io.StringIO()
         df.info(buf=buffer)
