@@ -9,4 +9,4 @@ class dfState:
         self.df: Optional[pd.DataFrame] = None  # This will holds the DataFrame globally but for now its empty
 
 # Create one instance to be imported everywhere across all the endpoints
-df_state = dfState()
+dataset_state = dfState()
