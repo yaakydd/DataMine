@@ -1,6 +1,6 @@
 from fastapi import FastAPI, HTTPException, APIRouter
 import pandas as pd
-from routes.dfState import dataset_state
+from .dfState import dataset_state
 
 
 clean = APIRouter()

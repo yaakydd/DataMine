@@ -1,7 +1,6 @@
 from typing import Optional
 import pandas as pd
 
-
 #Creating the dataset State class (plan)
 class dfState:
     # Using the class constructor to setup the dataframe
