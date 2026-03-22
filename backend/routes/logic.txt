@@ -7,12 +7,12 @@ Task 1:
 - Display all the column names and print it together with the datatypes 
 - Ask if the user wants to change any column names and dataypes
     .Allow user to change it and redisplay the column names
-## All the column names must be in the same format
+- All the column names must be in the same format
     .Fix spaces, symbols ($, %, !), and casing automatically
 
 2. Handling Missing Data
-- Print all the columns with missing data
-    . Show the percentage of the missing data in each column and explain to the user what it means and suggest what they can do and what it means if 
+- Print all the columns and rows with missing data
+    . Show the percentage of the missing data in each column and row separately and explain to the user what it means and suggest what they can do and what it means if 
     they do and what will happen if they don't
 - Apply all the changes the user makes to handle the missing data
     . Make sure to bare in mind the type of topic and its relevance and what it means if they handle the missing data
