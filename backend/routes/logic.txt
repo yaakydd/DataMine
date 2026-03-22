@@ -12,6 +12,12 @@ Task 1:
 
 2. Handling Missing Data
 - Print all the columns with missing data
+    . Show the percentage of the missing data in each column and explain to the user what it means and suggest what they can do and what it mean if 
+    they do and what will happen if they don't
+- Apply all the changes the user makes to handle the missing data
+    . Make sure to bare in mind the type of topic and its relevance and what it means if they handle the missing data
+
+3. Handling Duplicates
 
 
 
