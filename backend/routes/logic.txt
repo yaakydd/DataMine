@@ -24,6 +24,20 @@ Task 1:
 - Apply all the changes the user makes to handle the duplicated rows
     . Make sure to bare in mind the type of topic and its relevance and what it means if they handle the duplicated rows
 
+4. Outlier Detection
+- Use z-score or interquartile range to identify outliers
+    . Explain to the user what outliers are
+    . Depending on their topic, explain to them what these outliers identified(if any found)
+    will do it their data. Suggest some fixes and also explain to them what their choices will do to the data if they choose any option from your options
+
+5. Handling Skewed Data (Data Transformation)
+- Apply a Log Transformation or Square Root Transformation to pull the outliers closer to the center and create a more "Normal" (Gaussian) distribution.
+- Apply other transformation techniques relevant to their topic.
+
+5. Validation and Cross-Checking
+- This is the "sanity check" phase.
+- Logic Checks: Does a "Year of Birth" column say 2026 for someone listed as an "Adult"?Range Constraints: Ensuring a "Percentage" column doesn't have a value of $110\%$.
+
 
 
 
