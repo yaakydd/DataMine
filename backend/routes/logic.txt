@@ -1,1 +1,18 @@
 Data Cleaning Logic
+
+## IMPLEMENTATIONS
+
+Task 1:
+1. Correct data inconsistencies
+- Display all the column names and print it together with the datatypes 
+- Ask if the user wants to change any column names and dataypes
+    .Allow user to change it and redisplay the column names
+## All the column names must be in the same format
+    .Fix spaces, symbols ($, %, !), and casing automatically
+
+2. Handling Missing Data
+- Print all the columns with missing data
+
+
+
+
