@@ -1,0 +1,407 @@
+from fastapi import HTTPException, APIRouter
+from pydantic import BaseModel
+from routes.dfState import dataset_state
+import pandas as pd
+import numpy as np
+import re
+from typing import Optional, Dict
+
+task1 = APIRouter()
+
+
+# =============================================================================
+# HELPER FUNCTIONS
+# =============================================================================
+
+def require_df() -> pd.DataFrame:
+    """
+    Called at the start of every endpoint in this file.
+
+    Why: If a user hits a cleaning endpoint before uploading a file,
+    Python would crash with a confusing AttributeError on dataset_state.df
+    because it would be None. This function catches that early and returns
+    a clear, readable error message instead.
+    """
+    if dataset_state.df is None:
+        raise HTTPException(
+            status_code=400,
+            detail="No dataset loaded. Please upload a file first via POST /api/dataset_info"
+        )
+    return dataset_state.df
+
+
+def auto_clean_name(name: str) -> str:
+    """
+    Takes any raw column name and returns a clean, safe, standardised version.
+
+    Why each rule exists and in what order they run:
+
+    Rule 1 — strip()
+        Removes spaces from the very start and end of the name.
+        e.g. "  Age  " → "Age"
+        Must come first, otherwise a name like "  Age" still starts with spaces
+        when we try to replace internal spaces in Rule 2.
+
+    Rule 2 — replace spaces with underscores
+        e.g. "First Name" → "First_Name"
+        We use _ instead of removing spaces entirely because "FirstName" (no separator)
+        is harder to read than "first_name".
+
+    Rule 3 — replace any remaining non-word characters with underscores
+        \w in regex means: letters, digits, and underscore. So [^\w] means
+        anything that is NOT one of those — symbols like $, %, !, (, ), etc.
+        e.g. "Price ($)" → "Price___"
+        Must come after Rule 2 so spaces become _ before this rule runs,
+        otherwise they'd both be caught here and we'd get the right result
+        but for the wrong reason.
+
+    Rule 4 — collapse multiple underscores into one
+        Rule 3 turns "($)" into "___" (three underscores). This cleans that up.
+        e.g. "Price___" → "Price_"
+
+    Rule 5 — strip leading and trailing underscores
+        e.g. "_price_" → "price"
+        Happens after Rule 4 so we only need one strip, not multiple.
+
+    Rule 6 — lowercase everything
+        e.g. "FirstName" → "firstname"
+        Must be last because earlier rules use \w which is case-insensitive,
+        so casing does not affect whether earlier rules fire correctly.
+
+    Final result: a name that is safe in SQL, Python dot-notation, R, and Excel.
+    """
+    cleaned = name.strip()                          # Rule 1
+    cleaned = re.sub(r"\s+", "_", cleaned)          # Rule 2
+    cleaned = re.sub(r"[^\w]", "_", cleaned)        # Rule 3
+    cleaned = re.sub(r"_+", "_", cleaned)           # Rule 4
+    cleaned = cleaned.strip("_")                    # Rule 5
+    cleaned = cleaned.lower()                       # Rule 6
+    return cleaned
+
+
+def detect_issues(original: str, dtype: str, sample_values: list) -> list:
+    """
+    Inspects a single column and returns a list of plain-English problems.
+
+    This is the xAI layer of Task 1. Instead of silently auto-fixing
+    everything, we tell the user exactly what is wrong, why it matters,
+    and what will break if it is left unfixed.
+
+    Four checks are performed:
+
+    Check 1 — Spaces in the name
+        Why it matters: df["First Name"] works, but df.First Name is a
+        syntax error. Many SQL engines and BI tools also reject column names
+        with spaces unless you wrap them in quotes every single time.
+
+    Check 2 — Special characters ($, %, !, etc.)
+        Why it matters: Most query languages treat these as operators.
+        "Revenue ($)" in SQL would be interpreted as "Revenue" times something.
+
+    Check 3 — Mixed casing
+        Why it matters: Python, SQL, and R are all case-sensitive in different
+        ways. A column called "Revenue" and one called "revenue" are treated as
+        two different columns. Inconsistency guarantees bugs.
+
+    Check 4 — Numbers hidden inside text columns
+        Why it matters: If "Age" is stored as object dtype, you cannot do
+        df["Age"].mean() or df["Age"] > 18. Pandas will raise a TypeError.
+        We detect this by checking if every sample value looks like a number
+        even after stripping common formatting like $ and commas.
+    """
+    issues = []
+
+    # Check 1: spaces
+    if re.search(r"\s", original):
+        issues.append(
+            "Contains spaces — breaks SQL queries and pandas dot-notation access. "
+            "Example: df.First Name is a syntax error, but df.first_name works fine."
+        )
+
+    # Check 2: special characters
+    bad_chars = set(re.findall(r"[^\w\s]", original))
+    if bad_chars:
+        issues.append(
+            f"Contains special characters {bad_chars} — treated as operators in SQL "
+            "and most query tools, which will cause silent calculation errors or crashes."
+        )
+
+    # Check 3: mixed casing
+    if original != original.lower() and not original.isupper():
+        issues.append(
+            "Mixed casing — inconsistent with lowercase columns. Tools that are "
+            "case-sensitive will treat 'Revenue' and 'revenue' as two different columns."
+        )
+
+    # Check 4: numeric data stored as text.
+    # Strip formatting characters before testing so "$4,500" is correctly
+    # identified as a number disguised as a string.
+    if dtype == "object" and sample_values:
+        numeric_count = 0
+        for v in sample_values:
+            try:
+                float(
+                    str(v)
+                    .replace(",", "")
+                    .replace("$", "")
+                    .replace("%", "")
+                    .strip()
+                )
+                numeric_count += 1
+            except ValueError:
+                pass
+        if numeric_count == len(sample_values):
+            issues.append(
+                "Stored as text (object) but all sample values look like numbers. "
+                "You cannot calculate averages, sums, or comparisons on this column "
+                "until it is converted to float64 or int64."
+            )
+
+    return issues
+
+
+# =============================================================================
+# TASK 1 — CORRECT DATA INCONSISTENCIES
+#
+# Two endpoints:
+#
+#   GET  /task1/columns_info
+#        Reads the DataFrame and returns a full report on every column.
+#        Shows original name, suggested clean name, current dtype, sample
+#        values, and a plain-English list of issues found.
+#        This endpoint NEVER modifies the data.
+#
+#   POST /task1/update_columns
+#        Takes the user's instructions (renames, dtype changes, or auto-fix)
+#        and applies them to the DataFrame.
+#        Returns the updated column list so the UI can refresh immediately.
+# =============================================================================
+
+@task1.get("/task1/columns_info")
+async def get_columns_info():
+    """
+    Scans every column in the loaded DataFrame and returns a full report.
+
+    What the frontend does with this response:
+        - Renders a table with one row per column
+        - Pre-fills each rename input with the suggested_name
+        - Pre-selects the current dtype in each dropdown
+        - Shows issues_detected as xAI explanation cards per row
+        - Shows columns_with_issues in the summary banner at the top
+
+    This endpoint is read-only. Call it as many times as you like —
+    it will never change the data.
+    """
+    df = require_df()
+
+    columns_report = []
+
+    for col in df.columns:
+
+        suggested = auto_clean_name(col)
+
+        # Get up to 3 real (non-null) values from this column so the user
+        # can see what kind of data is actually in it while making decisions.
+        # .item() converts numpy scalar types (np.int64, np.float32 etc.)
+        # to plain Python int/float/str so JSON serialisation never fails.
+        sample_values = [
+            v.item() if hasattr(v, "item") else v
+            for v in df[col].dropna().head(3).tolist()
+        ]
+
+        issues = detect_issues(col, str(df[col].dtype), sample_values)
+
+        columns_report.append({
+            "original_name":    col,
+            "suggested_name":   suggested,
+
+            # True if auto_clean_name changed anything about this name.
+            # The frontend uses this flag to highlight rows that need attention.
+            "needs_fix":        col != suggested,
+
+            "current_dtype":    str(df[col].dtype),
+
+            # Full list of dtypes the user can pick from in the dropdown
+            "available_dtypes": [
+                "int64",
+                "float64",
+                "object",
+                "bool",
+                "datetime64[ns]",
+                "category"
+            ],
+
+            "sample_values":    sample_values,
+            "issues_detected":  issues,
+        })
+
+    return {
+        "total_columns": len(df.columns),
+        "columns_with_issues": sum(
+            1 for c in columns_report
+            if c["needs_fix"] or c["issues_detected"]
+        ),
+        "columns": columns_report,
+    }
+
+
+# ── Request body model ────────────────────────────────────────────────────────
+# Pydantic reads and validates the incoming JSON automatically.
+# Wrong field types → FastAPI returns a 422 error before our code even runs.
+
+class ColumnUpdatePayload(BaseModel):
+    """
+    Three ways the user can make changes, all combinable in one request:
+
+    auto_fix_all:
+        Renames every column using auto_clean_name() in one click.
+        When True, the renames dict is ignored.
+
+    renames:
+        Specific manual renames the user typed.
+        Only used when auto_fix_all is False.
+        e.g. {"First Name": "first_name", "Revenue ($)": "revenue_usd"}
+
+    dtype_changes:
+        Dtype conversions to apply, independent of renames.
+        e.g. {"age": "int64", "signup_date": "datetime64[ns]"}
+    """
+    auto_fix_all:  Optional[bool]            = False
+    renames:       Optional[Dict[str, str]]  = {}
+    dtype_changes: Optional[Dict[str, str]]  = {}
+
+
+@task1.post("/task1/update_columns")
+async def update_columns(payload: ColumnUpdatePayload):
+    """
+    Applies the user's column changes to the DataFrame.
+
+    The most important design decision here is working on a COPY first.
+
+    Why: If dtype conversion on column 4 fails, we don't want columns 1, 2,
+    and 3 to have already been renamed in dataset_state.df with no way to undo.
+    By working on df.copy(), the original is untouched until we are done.
+
+    Only at the very end, if at least one change succeeded, do we write back:
+        dataset_state.df = df
+
+    Errors are COLLECTED, not raised. This means if the user asks to convert
+    5 columns and one fails, the other 4 still go through. The response tells
+    them exactly which one failed and why, in plain English.
+    """
+    df      = require_df().copy()   # safe working copy
+    applied = []                    # successful changes — returned to the UI
+    errors  = []                    # problems found — also returned to the UI
+
+    # ── Renames ───────────────────────────────────────────────────────────────
+
+    if payload.auto_fix_all:
+        # Only build a rename entry for columns that actually need changing.
+        # This keeps the applied[] list clean and avoids no-op renames.
+        rename_map = {
+            col: auto_clean_name(col)
+            for col in df.columns
+            if col != auto_clean_name(col)
+        }
+        if rename_map:
+            df.rename(columns=rename_map, inplace=True)
+            applied.append(
+                f"Auto-fixed {len(rename_map)} column name(s): "
+                f"{list(rename_map.keys())} → {list(rename_map.values())}"
+            )
+        else:
+            applied.append("All column names are already clean — nothing to fix.")
+
+    elif payload.renames:
+        valid_renames = {}
+        for old_name, new_name in payload.renames.items():
+            if old_name not in df.columns:
+                errors.append(
+                    f'Rename failed: "{old_name}" does not exist in the dataset.'
+                )
+                continue
+            if not new_name or not new_name.strip():
+                errors.append(
+                    f'Rename failed: new name for "{old_name}" is empty.'
+                )
+                continue
+            valid_renames[old_name] = new_name.strip()
+
+        if valid_renames:
+            df.rename(columns=valid_renames, inplace=True)
+            applied.append(f"Renamed {len(valid_renames)} column(s).")
+
+    # ── Dtype changes ─────────────────────────────────────────────────────────
+
+    for col_name, new_dtype in (payload.dtype_changes or {}).items():
+
+        # A column might have just been renamed above, so check current columns
+        if col_name not in df.columns:
+            errors.append(
+                f'Dtype change failed: "{col_name}" not found. '
+                f'If you renamed it in this same request, use the new name.'
+            )
+            continue
+
+        current_dtype = str(df[col_name].dtype)
+
+        if current_dtype == new_dtype:
+            continue    # already correct, skip silently
+
+        try:
+            if new_dtype == "datetime64[ns]":
+                # pd.to_datetime() understands date strings like "2024-01-15",
+                # "Jan 15 2024", "15/01/2024". Plain .astype() does not.
+                # errors="coerce" turns unparseable values into NaT
+                # instead of crashing the whole conversion.
+                df[col_name] = pd.to_datetime(df[col_name], errors="coerce")
+
+            elif new_dtype == "bool":
+                # .astype(bool) converts any non-empty string to True,
+                # so the text "False" would wrongly become True.
+                # We map common truthy/falsy words manually first.
+                df[col_name] = df[col_name].map(
+                    lambda x:
+                        True  if str(x).strip().lower() in ("true",  "1", "yes") else
+                        False if str(x).strip().lower() in ("false", "0", "no")  else x
+                ).astype("bool")
+
+            elif new_dtype == "category":
+                # Category dtype stores repeated text values (e.g. "Male"/"Female",
+                # country names) as integer codes internally — can cut memory
+                # usage by up to 90% on low-cardinality columns.
+                df[col_name] = df[col_name].astype("category")
+
+            else:
+                # int64, float64, object — standard pandas conversion
+                df[col_name] = df[col_name].astype(new_dtype)
+
+            applied.append(f'"{col_name}": {current_dtype} → {new_dtype}')
+
+        except (ValueError, TypeError) as e:
+            errors.append(
+                f'Could not convert "{col_name}" to {new_dtype}. '
+                f'Reason: {str(e)}. '
+                f'Tip: check this column for unexpected text or mixed values first.'
+            )
+
+    # ── Save back to shared state ─────────────────────────────────────────────
+
+    # Only overwrite dataset_state.df if at least one change succeeded.
+    # Avoids an unnecessary write when everything errored out.
+    if applied:
+        dataset_state.df = df
+
+    # ── Return result ─────────────────────────────────────────────────────────
+
+    return {
+        "success": len(errors) == 0,
+        "applied": applied,
+        "errors":  errors,
+        # Full updated column list so the frontend can re-render immediately
+        # without making a second GET /task1/columns_info request
+        "updated_columns": [
+            {"name": col, "dtype": str(df[col].dtype)}
+            for col in df.columns
+        ],
+    }
