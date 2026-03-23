@@ -40,4 +40,18 @@ Task 1:
 
 
 
+** After **
+After all these preparations, the user would ne asked:
+1. Do you just want your cleaned dataset
+Output: Cleaned dataset plus a report on:
+    - The structure of the dataset and the data cleaning methods which were applied and why it was applied
 
+2. Do you want to get an executive brief to present to a board to help them make decisions;
+Output: CLeaned dataset plus a report on:
+    1. The structure of the dataset and the data cleaning methods which were applied and why it was applied
+    2. The executive brief summary
+
+3.Do you want to use the cleaned dataset to train a model;
+Output: CLeaned dataset plus data preprocessing steps for the model(including the options of models they can choose) and reports on:
+    1. The structure of the dataset and the data cleaning methods which were applied and why it was applied
+    2. The machine learning report
