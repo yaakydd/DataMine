@@ -34,7 +34,7 @@ Task 1:
 - Apply a Log Transformation or Square Root Transformation to pull the outliers closer to the center and create a more "Normal" (Gaussian) distribution.
 - Apply other transformation techniques relevant to their topic.
 
-5. Validation and Cross-Checking
+6. Validation and Cross-Checking
 - This is the "sanity check" phase.
 - Logic Checks: Does a "Year of Birth" column say 2026 for someone listed as an "Adult"?Range Constraints: Ensuring a "Percentage" column doesn't have a value of $110\%$.
 
