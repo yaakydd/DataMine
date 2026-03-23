@@ -1,6 +1,6 @@
 from fastapi import HTTPException, APIRouter
 from pydantic import BaseModel
-from routes.dfState import dataset_state
+from State.dfState import dataset_state
 from xAI.transformation import (
     explain_what_skewness_is,
     explain_skewness_severity,
@@ -22,6 +22,7 @@ from xAI.transformation import (
 import pandas as pd
 import numpy as np
 from scipy import stats
+from State.snapshotState import snapshot_store
 from typing import Dict, Optional, List, Any
 
 
@@ -376,6 +377,7 @@ async def fix_skewness(payload: SkewnessFixPayload):
             errors.append(f'"{col}": unexpected error during {method} — {str(e)}')
 
     if [a for a in applied if "no transformation" not in a]:
+        snapshot_store.save(f"Task 5 — transformations ({len(applied)} column(s))", require_df())
         dataset_state.df = df
 
     return {
@@ -573,6 +575,7 @@ async def scale_columns(payload: ScalingPayload):
             errors.append(f'"{col}": unexpected error — {str(e)}')
 
     if applied:
+        snapshot_store.save(f"Task 5 — scaling ({len(applied)} column(s))", require_df())
         dataset_state.df = df
 
     return {
@@ -697,6 +700,7 @@ async def parse_dates(payload: DateParsePayload):
             errors.append(f'"{col}": unexpected error — {str(e)}')
 
     if applied:
+        snapshot_store.save(f"Task 5 — date parsing ({len(payload.columns)} column(s))", require_df())
         dataset_state.df = df
 
     return {

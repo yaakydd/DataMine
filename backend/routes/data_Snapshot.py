@@ -10,8 +10,8 @@ Register in main.py:
 
 from fastapi import HTTPException, APIRouter
 from pydantic import BaseModel
-from routes.dfState import dataset_state
-from snapshot.snapshotState import snapshot_store
+from backend.State.dfState import dataset_state
+from State.snapshotState import snapshot_store
 
 snapshot_router = APIRouter()
 

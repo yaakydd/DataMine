@@ -1,9 +1,10 @@
 from fastapi import File, UploadFile, APIRouter, HTTPException
-from .dfState import dataset_state
+from ..State.dfState import dataset_state
 import pandas as pd
 import io
 import json
 import pyarrow.parquet as pq
+from State.snapshotState import snapshot_store
 
 
 """
@@ -56,6 +57,7 @@ async def upload_file(file: UploadFile = File(...)):
             raise HTTPException(status_code=400, detail=f"Unsupported file type: {file.content_type}")
 
         dataset_state.df = df  # Storing the DataFrame in the global state for access across endpoints
+        snapshot_store.clear()
 
         # Processing the metadata to be stored
         buffer = io.StringIO()

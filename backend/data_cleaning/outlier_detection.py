@@ -2,7 +2,7 @@ from fastapi import HTTPException, APIRouter
 from pydantic import BaseModel
 from scipy import stats
 from typing import Dict, Optional, List, Any
-from routes.dfState import dataset_state
+from State.dfState import dataset_state
 from xAI.outliers import (
     explain_what_outliers_are,
     explain_zscore_method,
@@ -23,6 +23,7 @@ from xAI.outliers import (
 )
 import pandas as pd
 import numpy as np
+from State.snapshotState import snapshot_store
 
 task4 = APIRouter()
 
@@ -287,6 +288,7 @@ async def fix_outliers(payload: OutlierFixPayload):
             errors.append(f'"{col}": unexpected error — {str(e)}')
 
     if applied and not all("left as-is" in a for a in applied):
+        snapshot_store.save(f"Task 4 — outlier fixes ({len(applied)} column(s))", require_df())
         dataset_state.df = df
 
     return {
@@ -477,6 +479,7 @@ async def fix_multivariate_outliers(payload: MultivariateOutlierFixPayload):
             detail=f'Unknown method "{payload.method}". Valid options: drop, flag.'
         )
 
+    snapshot_store.save(f"Task 4 — multivariate outliers ({payload.method})", require_df())
     dataset_state.df = df
     return {
         "success":   len(errors) == 0,

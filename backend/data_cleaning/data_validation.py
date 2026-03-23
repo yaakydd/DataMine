@@ -1,6 +1,6 @@
 from fastapi import HTTPException, APIRouter
 from pydantic import BaseModel
-from routes.dfState import dataset_state
+from State.dfState import dataset_state
 from xAI.validation import (
     explain_what_validation_is,
     explain_rule_no_future_year,
@@ -24,6 +24,7 @@ import pandas as pd
 import numpy as np
 import datetime
 import re as _re
+from State.snapshotState import snapshot_store
 from typing import Dict, Any, Optional, List
 
 task6 = APIRouter()
@@ -490,6 +491,7 @@ async def fix_violations(payload: FixViolationPayload):
         errors.append(f"Unexpected error: {str(e)}")
 
     if applied and not errors:
+        snapshot_store.save(f"Task 6 — fixed '{col}' violations ({payload.fix_method})", require_df())
         dataset_state.df = df
 
     return {
@@ -626,6 +628,7 @@ async def fix_date_range(payload: DateRangeFixPayload):
             detail=f'"{col}" is not a datetime or numeric column.'
         )
 
+    snapshot_store.save(f"Task 6 — date range fix on '{payload.column}'", require_df())
     dataset_state.df = df
     return {
         "success":   True,
@@ -782,6 +785,7 @@ async def fix_cross_column(payload: CrossColumnFixPayload):
     else:
         df.loc[payload.violation_indices, col] = np.nan
 
+    snapshot_store.save(f"Task 6 — cross-column fix on '{col}'", require_df())
     dataset_state.df = df
 
     return {

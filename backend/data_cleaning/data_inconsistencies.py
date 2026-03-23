@@ -1,6 +1,6 @@
 from fastapi import HTTPException, APIRouter
 from pydantic import BaseModel
-from routes.dfState import dataset_state              # dfState.py sits at the backend root
+from State.dfState import dataset_state              # dfState.py sits at the backend root
 from xAI.inconsistencies_explainer import (                   # all explanations live in xai/explainer.py
     explain_spaces_in_name,
     explain_special_chars,
@@ -20,6 +20,7 @@ import pandas as pd
 import numpy as np
 import re
 from typing import Optional, Dict
+from State.snapshotState import snapshot_store
 
 task1 = APIRouter()
 
@@ -348,6 +349,7 @@ async def update_columns(payload: ColumnUpdatePayload):
     # ── Save back ─────────────────────────────────────────────────────────────
 
     if applied:
+        snapshot_store.save(f"Task 1 — column changes ({len(applied)} update(s))", require_df())
         dataset_state.df = df
 
     # ── Return ────────────────────────────────────────────────────────────────
@@ -802,7 +804,7 @@ async def get_category_info():
                 for v in variants
             }
             # The canonical suggestion is the most frequently occurring variant
-            suggested_canonical = max(counts.keys(), key=lambda k: counts[k])
+            suggested_canonical = max(counts, key=lambda k: counts.get(k, 0))
             group_details.append({
                 "variants":          variants,
                 "counts":            counts,
@@ -892,6 +894,7 @@ async def harmonise_categories(payload: HarmonisePayload):
     new_uniques = int(df[col].nunique())
     reduced_by  = original_uniques - new_uniques
 
+    snapshot_store.save(f"Task 1 — harmonised categories in '{col}'", require_df())
     dataset_state.df = df
 
     return {

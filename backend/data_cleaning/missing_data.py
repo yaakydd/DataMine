@@ -1,7 +1,7 @@
 from fastapi import HTTPException, APIRouter
 from pydantic import BaseModel
 from typing import Dict, Any, Optional
-from routes.dfState import dataset_state
+from State.dfState import dataset_state
 from xAI.missingData_explainer import (
     explain_missing_severity,
     explain_missing_if_you_drop_rows,
@@ -14,6 +14,7 @@ from xAI.missingData_explainer import (
 )
 import pandas as pd
 import numpy as np
+from State.snapshotState import snapshot_store
 
 task2 = APIRouter()
 
@@ -290,6 +291,7 @@ async def fix_missing(payload: MissingFixPayload):
     # ── Save back ─────────────────────────────────────────────────────────────
 
     if applied:
+        snapshot_store.save(f"Task 2 — missing data: {len(applied)} fix(es) applied", require_df())
         dataset_state.df = df
 
     # ── Return ────────────────────────────────────────────────────────────────
