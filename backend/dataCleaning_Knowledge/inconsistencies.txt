@@ -16,3 +16,20 @@ detect_issues() — looks at one column and checks for 4 problems: spaces in the
 GET /task1/columns_info — loops through every column in the DataFrame, runs auto_clean_name() and detect_issues() on each one, and returns a full report. It never touches the data, only reads it. The frontend uses this to render the columns table with suggested names and issue explanations already filled in.
 POST /task1/update_columns — this is the only endpoint that modifies anything. It takes a .copy() of the DataFrame first so the original is always safe. Then it applies renames and dtype changes one by one, collecting errors without stopping. At the very end it writes dataset_state.df = df — only if at least one change succeeded. Returns the updated column list so the frontend can re-render without making another GET request.
 xai/explainer.py — stores nothing but strings. Every explanation for Task 1 lives there as its own function. When you want to improve how something is explained to the user, you only touch this file, never the logic file.
+
+Here's the full breakdown of what was added and every decision made.
+Three new endpoints were added to data_inconsistencies.py. The original two (GET /columns_info and POST /update_columns) are completely untouched. The upgrades live below them as clean additions.
+GET /task1/infer_types — Data type inference.
+Three checks run on every column. The hidden boolean check uses series.unique() and tests whether the set of values is a subset of {0, 1} — if a float column only ever contains 0.0 and 1.0, it's almost certainly a flag that should be bool. The ID check combines two signals — all values unique AND the column name contains a known identifier keyword — because uniqueness alone isn't enough (a name column might also be unique). The high cardinality check only fires when uniqueness exceeds 50% AND there are more than 10 unique values, avoiding false positives on tiny datasets.
+GET /task1/text_value_info — Text value scanning.
+The whitespace detection uses series != series.str.strip() — a vectorised comparison that's far faster than looping. The casing detection compares series.nunique() (raw) against series.str.lower().nunique() (normalised) — if lowercasing reduces the unique count, casing variants exist. The groupby(series.str.lower()) then reconstructs the exact variant groups so the user sees {"male": ["Male", "male", "MALE", "M "]} not just a count.
+POST /task1/clean_text_values — Text value cleaning.
+The original_nulls = df[col].isna() line before every operation and df.loc[original_nulls, col] = np.nan after is the critical safety step. Pandas .str operations silently convert NaN to the string "nan" in some versions. Saving the null positions first and restoring them after prevents NaN values from becoming the literal string "nan" in your dataset.
+POST /task1/harmonise_categories — Category harmonisation.
+The mapped.combine_first(df[col]) pattern is the key design decision. .map() returns NaN for any value not found in the mapping dict — which would erase all unmapped values. combine_first() fills those NaN positions with the original values, meaning only the explicitly mapped variants get replaced and everything else stays exactly as it was.
+New endpoints summary — what to register in main.py:
+GET  /api/task1/infer_types           ← detects hidden booleans, IDs, high cardinality
+GET  /api/task1/text_value_info       ← scans cell values for whitespace, casing, symbols
+POST /api/task1/clean_text_values     ← applies trim/lower/upper/titlecase/remove_special
+GET  /api/task1/category_info         ← finds "Male"/"male"/"M" type variant groups
+POST /api/task1/harmonise_categories  ← maps variants to canonical forms

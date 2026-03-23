@@ -379,3 +379,116 @@ def explain_outlier_if_you_do_nothing(col_name: str) -> str:
         "Be aware that these values will continue to influence your means "
         "and standard deviations."
     )
+
+# =============================================================================
+# TASK 4 UPGRADES — paste at the bottom of your outliers_explainer.py
+# =============================================================================
+
+def explain_what_multivariate_outliers_are() -> str:
+    return (
+        "Univariate outlier detection (Z-score and IQR) looks at one column at a time. "
+        "It will miss outliers that only become visible when two or more columns "
+        "are examined together. "
+        "For example: a person with height = 180cm and weight = 180kg. "
+        "Neither value is individually unusual — 180cm is a normal height, "
+        "and 180kg exists in the dataset. But the COMBINATION is biologically "
+        "implausible and almost certainly a data entry error. "
+        "Univariate methods miss this entirely. "
+        "Multivariate outlier detection catches these impossible combinations."
+    )
+
+
+def explain_mahalanobis_method() -> str:
+    return (
+        "Mahalanobis distance measures how far a data point sits from the "
+        "centre of the distribution, taking into account the correlations "
+        "between columns. "
+        "Think of it as a generalised Z-score for multiple columns at once. "
+        "A regular Z-score asks: how unusual is this value in isolation? "
+        "Mahalanobis asks: how unusual is this combination of values together? "
+        "It uses the covariance matrix of the numeric columns to account for "
+        "relationships between them — so a combination that looks normal in "
+        "each column individually but is impossible given how those columns "
+        "relate to each other will still be flagged. "
+        "We flag rows whose Mahalanobis distance exceeds the chi-squared "
+        "critical value at 97.5% confidence for the number of columns used."
+    )
+
+
+def explain_mahalanobis_result(
+    outlier_count: int,
+    total_rows: int,
+    columns_used: list,
+    threshold: float,
+) -> str:
+    pct      = round((outlier_count / total_rows) * 100, 2)
+    col_list = ", ".join(f'"{c}"' for c in columns_used)
+    return (
+        f"{outlier_count} multivariate outlier(s) found ({pct}% of rows) "
+        f"across the column combination: {col_list}. "
+        f"Chi-squared threshold used: {threshold:.4f}. "
+        "These rows are not necessarily outliers in any single column — "
+        "they are outliers because the combination of their values is "
+        "statistically improbable given how these columns normally relate to each other. "
+        "Review them carefully before deciding to remove or cap them."
+    )
+
+
+def explain_mahalanobis_no_result(columns_used: list) -> str:
+    col_list = ", ".join(f'"{c}"' for c in columns_used)
+    return (
+        f"No multivariate outliers found across: {col_list}. "
+        "All row combinations sit within the expected range given the "
+        "correlations between these columns. "
+        "Your data looks clean from a multivariate perspective."
+    )
+
+
+def explain_mahalanobis_singular_matrix() -> str:
+    return (
+        "The covariance matrix of the selected columns is singular (cannot be inverted). "
+        "This usually happens when two or more columns are perfectly correlated — "
+        "one column is a linear combination of another. "
+        "For example, if you have both 'total_price' and 'unit_price × quantity', "
+        "these are identical and make the matrix singular. "
+        "Remove one of the perfectly correlated columns and try again. "
+        "The correlation analysis below can help you identify which columns to remove."
+    )
+
+
+def explain_correlation_overview() -> str:
+    return (
+        "Correlation measures how strongly two numeric columns move together. "
+        "A correlation of +1.0 means they increase together perfectly. "
+        "A correlation of -1.0 means one increases as the other decreases perfectly. "
+        "A correlation of 0 means they have no linear relationship. "
+        "Columns with very high correlation (above 0.95 or below -0.95) are "
+        "almost redundant — they carry nearly identical information. "
+        "Keeping both adds noise without adding knowledge, and can cause "
+        "problems in statistical analysis called multicollinearity."
+    )
+
+
+def explain_high_correlation_pair(
+    col1: str,
+    col2: str,
+    correlation: float,
+) -> str:
+    direction = "positively" if correlation > 0 else "negatively"
+    return (
+        f'"{col1}" and "{col2}" are {direction} correlated at {correlation:.4f}. '
+        "This means they carry nearly identical information. "
+        "In a regression or statistical model, including both will inflate "
+        "standard errors and make coefficient estimates unreliable — "
+        "this is called multicollinearity. "
+        "Consider keeping only the one that is more directly relevant "
+        "to what you are measuring, or combining them into a single derived column."
+    )
+
+
+def explain_no_high_correlations() -> str:
+    return (
+        "No highly correlated column pairs found (threshold: |r| > 0.95). "
+        "Your numeric columns are sufficiently independent of each other. "
+        "Multicollinearity is not a concern for this dataset."
+    )

@@ -1,5 +1,6 @@
 from fastapi import HTTPException, APIRouter
 from pydantic import BaseModel
+from typing import Dict, Any, Optional
 from routes.dfState import dataset_state
 from xAI.missingData_explainer import (
     explain_missing_severity,
@@ -13,7 +14,6 @@ from xAI.missingData_explainer import (
 )
 import pandas as pd
 import numpy as np
-from typing import Dict, Any
 
 task2 = APIRouter()
 
@@ -63,22 +63,14 @@ async def get_missing_info():
     Row-level report:
       - How many rows have at least one missing value
       - What percentage of total rows that represents
-      - A plain-English explanation of what this means for the dataset
 
     Overall summary:
       - Total missing cells across the entire DataFrame
       - Overall missing percentage
-
-    The frontend uses this to render:
-      - A summary banner (total missing, rows affected, overall %)
-      - One card per column that has missing data, showing the severity,
-        the explanation, and a dropdown to pick a fix strategy
-      - Each strategy option in the dropdown shows its own explanation
-        so the user understands what they are choosing before they click Apply
     """
-    df         = require_df()
-    total_rows = len(df)
-    total_cells = df.size   # total cells = rows × columns
+    df          = require_df()
+    total_rows  = len(df)
+    total_cells = df.size
 
     # ── Column-level analysis ─────────────────────────────────────────────────
 
@@ -87,13 +79,11 @@ async def get_missing_info():
     for col in df.columns:
         missing_count = int(df[col].isna().sum())
 
-        # Skip columns with no missing data — no need to show them
         if missing_count == 0:
             continue
 
         pct = round((missing_count / total_rows) * 100, 2)
 
-        # Severity band — used by the frontend to colour-code the card
         if pct < 5:
             severity = "low"
         elif pct < 20:
@@ -101,16 +91,7 @@ async def get_missing_info():
         else:
             severity = "high"
 
-        dtype = str(df[col].dtype)
-
-        # Build the strategies dict.
-        # Every strategy gets its own explanation from xai/explainer.py.
-        # The frontend renders each one as a selectable option with the
-        # explanation shown beneath it so the user can read before choosing.
-        #
-        # We only offer mean/median if the column is numeric.
-        # We always offer mode, custom fill, drop rows, drop column, do nothing.
-
+        dtype      = str(df[col].dtype)
         strategies = {}
 
         if dtype in ("int64", "float64") or df[col].dtype.kind in ("i", "f"):
@@ -126,11 +107,9 @@ async def get_missing_info():
                 "explanation": explain_missing_if_you_fill_median(col, median_val),
             }
 
-        # Mode works for both numeric and text columns
         mode_val = df[col].mode()
         if not mode_val.empty:
             mode_display = mode_val[0]
-            # Convert numpy type to plain Python for JSON safety
             if hasattr(mode_display, "item"):
                 mode_display = mode_display.item()
             strategies["fill_mode"] = {
@@ -167,31 +146,23 @@ async def get_missing_info():
 
     # ── Row-level analysis ────────────────────────────────────────────────────
 
-    # .any(axis=1) returns True for every row that has at least one NaN
     rows_with_missing = int(df.isnull().any(axis=1).sum())
     rows_missing_pct  = round((rows_with_missing / total_rows) * 100, 2)
 
     # ── Overall summary ───────────────────────────────────────────────────────
 
-    total_missing      = int(df.isnull().sum().sum())
+    total_missing       = int(df.isnull().sum().sum())
     overall_missing_pct = round((total_missing / total_cells) * 100, 2)
 
     return {
-        # Summary numbers for the top banner cards
         "total_rows":           total_rows,
         "total_columns":        len(df.columns),
         "total_missing_cells":  total_missing,
         "overall_missing_pct":  overall_missing_pct,
-
-        # Row-level numbers
         "rows_with_missing":    rows_with_missing,
         "rows_missing_pct":     rows_missing_pct,
-
-        # Column-level detail — only columns that have missing values
         "columns_with_missing": columns_with_missing,
-
-        # How many columns are clean — useful for the UI summary
-        "clean_columns": len(df.columns) - len(columns_with_missing),
+        "clean_columns":        len(df.columns) - len(columns_with_missing),
     }
 
 
@@ -224,20 +195,8 @@ async def fix_missing(payload: MissingFixPayload):
     """
     Applies the user's chosen fix strategy to each column they specified.
 
-    Works on a .copy() — the original dataset_state.df is never touched
-    until all operations are done and at least one succeeded.
-
-    For each column in the strategy dict:
-      fill_mean    — replace NaN with the column mean
-      fill_median  — replace NaN with the column median
-      fill_mode    — replace NaN with the most frequent value
-      fill_custom  — replace NaN with the value the user typed
-      drop_rows    — remove every row where this column is NaN
-      drop_column  — remove the entire column from the DataFrame
-      do_nothing   — skip this column, leave NaN as-is
-
-    After applying all changes, saves the modified DataFrame back to
-    dataset_state and returns a summary of what was done.
+    Works on a .copy() — dataset_state.df is never touched until all
+    operations are done and at least one succeeded.
     """
     df      = require_df().copy()
     applied = []
@@ -245,7 +204,6 @@ async def fix_missing(payload: MissingFixPayload):
 
     for col, config in payload.strategy.items():
 
-        # Validate the column exists
         if col not in df.columns:
             errors.append(f'"{col}" not found in the dataset.')
             continue
@@ -261,10 +219,10 @@ async def fix_missing(payload: MissingFixPayload):
                     )
                     continue
                 mean_val = df[col].mean()
-                # inplace=True modifies the column directly inside our copy
                 df[col].fillna(mean_val, inplace=True)
                 applied.append(
-                    f'"{col}": filled {df[col].isna().sum()} NaN(s) with mean = {mean_val:.4f}'
+                    f'"{col}": filled {df[col].isna().sum()} NaN(s) '
+                    f'with mean = {mean_val:.4f}'
                 )
 
             elif method == "fill_median":
@@ -282,7 +240,9 @@ async def fix_missing(payload: MissingFixPayload):
             elif method == "fill_mode":
                 mode_series = df[col].mode()
                 if mode_series.empty:
-                    errors.append(f'"{col}": cannot compute mode — column may be all NaN.')
+                    errors.append(
+                        f'"{col}": cannot compute mode — column may be all NaN.'
+                    )
                     continue
                 mode_val = mode_series[0]
                 df[col].fillna(mode_val, inplace=True)
@@ -296,12 +256,12 @@ async def fix_missing(payload: MissingFixPayload):
                     )
                     continue
                 df[col].fillna(custom_val, inplace=True)
-                applied.append(f'"{col}": filled NaN(s) with custom value = "{custom_val}"')
+                applied.append(
+                    f'"{col}": filled NaN(s) with custom value = "{custom_val}"'
+                )
 
             elif method == "drop_rows":
                 before = len(df)
-                # dropna with subset=[col] only drops rows where THIS column is NaN
-                # This is safer than df.dropna() which drops rows missing ANY column
                 df.dropna(subset=[col], inplace=True)
                 df.reset_index(drop=True, inplace=True)
                 rows_dropped = before - len(df)
@@ -334,8 +294,6 @@ async def fix_missing(payload: MissingFixPayload):
 
     # ── Return ────────────────────────────────────────────────────────────────
 
-    # Re-count missing values in the updated DataFrame so the frontend
-    # can immediately show the new state without another GET request
     remaining_missing = int(df.isnull().sum().sum())
 
     return {

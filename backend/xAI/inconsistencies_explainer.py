@@ -76,3 +76,75 @@ def explain_dtype_change_category() -> str:
         "Pandas stores them as integer codes internally, which can cut memory "
         "usage by up to 90% compared to storing raw text."
     )
+
+# =============================================================================
+# TASK 1 UPGRADES — TEXT CLEANING, CATEGORICAL HARMONISATION, TYPE INFERENCE
+# =============================================================================
+
+def explain_text_value_cleaning(col_name: str, issues_found: int) -> str:
+    return (
+        f'"{col_name}" has {issues_found} value(s) with text formatting issues. '
+        "Cell values like 'london', 'London', 'LONDON ', ' london' all mean "
+        "the same thing but Python and SQL treat them as completely different categories. "
+        "This silently inflates your category counts, breaks GROUP BY queries, "
+        "and causes value_counts() to show duplicates that are not real duplicates. "
+        "Cleaning trims whitespace, standardises casing, and removes invisible characters."
+    )
+
+
+def explain_categorical_harmonisation(col_name: str, variants: dict) -> str:
+    groups = "; ".join(
+        f"{canonical} <- {v}"
+        for canonical, v in list(variants.items())[:3]
+    )
+    return (
+        f'"{col_name}" has inconsistent category values that mean the same thing. '
+        f"Example groups detected: {groups}. "
+        "These variants will be counted separately in every analysis — "
+        "a pivot table will show 'Male', 'male', 'M', and 'MALE' as four different "
+        "groups instead of one. Harmonising maps all variants to one canonical form."
+    )
+
+
+def explain_hidden_boolean(col_name: str) -> str:
+    return (
+        f'"{col_name}" only contains 0 and 1 but is stored as int64 or float64. '
+        "This is almost certainly a boolean column (True/False, Yes/No). "
+        "Converting it to bool dtype makes the column meaning explicit, "
+        "reduces memory usage, and prevents accidental arithmetic on flag columns "
+        "like summing a column that means 'is_active'."
+    )
+
+
+def explain_likely_id_column(col_name: str) -> str:
+    return (
+        f'"{col_name}" appears to be an ID column — every value is unique '
+        "and the name contains 'id', 'key', 'code', or 'uuid'. "
+        "ID columns should never be used in statistical calculations. "
+        "Taking the mean of a customer ID is meaningless. "
+        "Consider excluding this column from any numeric analysis."
+    )
+
+
+def explain_high_cardinality(col_name: str, unique_count: int, total: int) -> str:
+    pct = round((unique_count / total) * 100, 1)
+    return (
+        f'"{col_name}" has {unique_count} unique values out of {total} rows ({pct}%). '
+        "High cardinality text columns are rarely useful as categories — "
+        "if almost every row has a different value, grouping by this column "
+        "produces groups of size 1, which is statistically meaningless. "
+        "This column may be a free-text field, a name, or an ID stored as text. "
+        "Consider dropping it or extracting structured information from it."
+    )
+
+
+def explain_text_clean_result(col_name: str, method: str) -> str:
+    methods = {
+        "trim":           f'Trimmed whitespace from all values in "{col_name}". Leading and trailing spaces removed.',
+        "lowercase":      f'Lowercased all values in "{col_name}". Every value is now lowercase.',
+        "uppercase":      f'Uppercased all values in "{col_name}". Every value is now uppercase.',
+        "titlecase":      f'Title-cased all values in "{col_name}". First letter of each word is capitalised.',
+        "remove_special": f'Removed special characters from values in "{col_name}". Only letters, digits, and spaces kept.',
+        "all":            f'Applied full text cleaning to "{col_name}": trimmed, lowercased, and removed special characters.',
+    }
+    return methods.get(method, f'Applied {method} cleaning to "{col_name}".')

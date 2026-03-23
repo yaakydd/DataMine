@@ -249,3 +249,80 @@ def explain_subset_duplicates(cols: list, dup_count: int) -> str:
         "these specific fields repeat. This often signals a data entry error "
         "or a join that produced unintended matches on those columns."
     )
+
+# =============================================================================
+# TASK 3 UPGRADES — paste at the bottom of your duplicates_explainer.py
+# =============================================================================
+
+def explain_what_fuzzy_duplicates_are() -> str:
+    return (
+        "Exact duplicate detection only catches rows where every character matches perfectly. "
+        "Fuzzy duplicates are rows that represent the same real-world entity but differ "
+        "slightly due to typos, spacing, or casing — for example: "
+        "'John Smith' and 'john smith ', or 'New York' and 'new york'. "
+        "These pass through exact deduplication undetected but still corrupt your "
+        "aggregations, inflate row counts, and produce misleading group statistics. "
+        "Fuzzy detection uses string similarity scoring to catch these near-matches."
+    )
+
+
+def explain_fuzzy_match(
+    col_name: str,
+    val1: str,
+    val2: str,
+    similarity: float,
+    row_idx1: int,
+    row_idx2: int,
+) -> str:
+    return (
+        f'Near-duplicate found in "{col_name}": '
+        f'row {row_idx1} ("{val1}") and row {row_idx2} ("{val2}") '
+        f"are {similarity:.1f}% similar. "
+        "These may represent the same entity with a data entry inconsistency. "
+        "Review both rows and decide whether to merge, standardise, or keep them separate."
+    )
+
+
+def explain_fuzzy_threshold(threshold: float) -> str:
+    return (
+        f"Similarity threshold set to {threshold:.0f}%. "
+        f"Any two values with a similarity score at or above {threshold:.0f}% "
+        "will be flagged as potential duplicates. "
+        "Higher threshold (e.g. 95%) = fewer but more certain matches. "
+        "Lower threshold (e.g. 80%) = more matches but more false positives. "
+        "Start at 90% and lower it if you are missing obvious duplicates."
+    )
+
+
+def explain_duplicate_impact(
+    col_name: str,
+    mean_before: float,
+    mean_after: float,
+    sum_before: float,
+    sum_after: float,
+    count_before: int,
+    count_after: int,
+) -> str:
+    mean_change = mean_after - mean_before
+    sum_change  = sum_after  - sum_before
+    direction   = "increase" if mean_change > 0 else "decrease"
+
+    return (
+        f'Impact on "{col_name}" after removing duplicates: '
+        f"row count {count_before} -> {count_after} ({count_before - count_after} removed). "
+        f"Mean: {mean_before:.4f} -> {mean_after:.4f} "
+        f"({direction} of {abs(mean_change):.4f}). "
+        f"Sum: {sum_before:.4f} -> {sum_after:.4f} "
+        f"(change of {sum_change:.4f}). "
+        "If the mean changed significantly, your duplicates were not evenly distributed "
+        "across the value range — removing them will affect your statistical summaries."
+    )
+
+
+def explain_no_fuzzy_columns() -> str:
+    return (
+        "No text columns were found to perform fuzzy duplicate detection on. "
+        "Fuzzy detection only applies to text (object dtype) columns. "
+        "Your dataset may be entirely numeric, in which case exact duplicate "
+        "detection in the main task is sufficient."
+    )

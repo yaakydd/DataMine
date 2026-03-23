@@ -516,3 +516,123 @@ def explain_transform_result(
             f"Skewness increased slightly. Consider trying a different transformation method."
         )
     )
+
+# =============================================================================
+# TASK 5 UPGRADES — paste at the bottom of your transformation_explainer.py
+# =============================================================================
+
+def explain_what_scaling_is() -> str:
+    return (
+        "Feature scaling adjusts numeric columns so they all operate on the "
+        "same magnitude — without changing the shape or distribution of the data. "
+        "This is different from transformation (which fixes skewness). "
+        "Scaling fixes the problem of one column dominating another purely "
+        "because its numbers are larger. "
+        "For example: an 'age' column ranges from 18 to 90, while a 'salary' "
+        "column ranges from 20,000 to 200,000. Any distance-based calculation "
+        "or weighted average will be almost entirely controlled by salary "
+        "simply because the numbers are bigger — not because it is more important. "
+        "Scaling removes that numerical dominance."
+    )
+
+
+def explain_minmax_scaling(col_name: str, old_min: float, old_max: float) -> str:
+    return (
+        f"Min-Max scaling on '{col_name}': every value is rescaled to the range [0, 1]. "
+        f"The original minimum ({old_min:.4f}) maps to 0, "
+        f"the original maximum ({old_max:.4f}) maps to 1, "
+        "and everything in between scales proportionally. "
+        "Formula: (x - min) / (max - min). "
+        "The shape of the distribution is completely preserved — "
+        "only the scale changes. "
+        "Best used when you need values bounded between 0 and 1, "
+        "or when your data does not have significant outliers "
+        "(extreme values will compress all other values toward 0)."
+    )
+
+
+def explain_zscore_scaling(col_name: str, mean: float, std: float) -> str:
+    return (
+        f"Z-score standardisation on '{col_name}': every value is rescaled "
+        f"so the column has a mean of 0 and a standard deviation of 1. "
+        f"Original mean was {mean:.4f}, original std was {std:.4f}. "
+        "Formula: (x - mean) / std. "
+        "Values above the mean become positive, values below become negative. "
+        "The shape of the distribution is preserved — only the centre and spread change. "
+        "Best used when your data has outliers (unlike Min-Max, extreme values "
+        "do not compress the rest of the data), or when your analysis assumes "
+        "normally distributed inputs."
+    )
+
+
+def explain_robust_scaling(col_name: str, median: float, iqr: float) -> str:
+    return (
+        f"Robust scaling on '{col_name}': every value is rescaled using the "
+        f"median ({median:.4f}) and IQR ({iqr:.4f}) instead of mean and std. "
+        "Formula: (x - median) / IQR. "
+        "Because it uses percentiles instead of the mean, outliers have almost "
+        "no influence on the scaling. The result is not bounded to [0, 1] — "
+        "values can go beyond that range — but the bulk of the data sits "
+        "in a compact range around 0. "
+        "Best used when your column has significant outliers that you want "
+        "to keep in the data but not let dominate the scale."
+    )
+
+
+def explain_scaling_result(
+    col_name: str,
+    method: str,
+    new_min: float,
+    new_max: float,
+    new_mean: float,
+) -> str:
+    return (
+        f"'{col_name}' after {method}: "
+        f"range is now [{new_min:.4f}, {new_max:.4f}], "
+        f"mean is now {new_mean:.4f}."
+    )
+
+
+# =============================================================================
+# TASK 5 UPGRADES — DATE AND TIME PARSING
+# =============================================================================
+
+def explain_what_date_parsing_is() -> str:
+    return (
+        "Date columns often contain values in multiple inconsistent formats — "
+        "'01/15/2024', '2024-01-15', 'Jan 15, 2024', and '15-Jan-24' "
+        "all represent the same date but are treated as four different text strings. "
+        "This means sorting, filtering, and calculating time differences all fail. "
+        "Date parsing detects these columns and standardises all values into "
+        "one consistent datetime format so time-based operations work correctly."
+    )
+
+
+def explain_date_column_found(col_name: str, sample_values: list) -> str:
+    samples = ", ".join(f'"{v}"' for v in sample_values[:3])
+    return (
+        f'"{col_name}" appears to contain dates (sample values: {samples}). '
+        "It is currently stored as text, which means you cannot calculate "
+        "the difference between dates, sort chronologically, or extract "
+        "year/month/day components. "
+        "Converting to datetime will unlock all of these operations."
+    )
+
+
+def explain_date_parse_result(
+    col_name: str,
+    parsed_count: int,
+    failed_count: int,
+    total: int,
+) -> str:
+    pct = round((parsed_count / total) * 100, 1) if total > 0 else 0
+    if failed_count == 0:
+        return (
+            f'"{col_name}": all {parsed_count} values parsed successfully to datetime. '
+            "You can now use .dt.year, .dt.month, .dt.day and calculate time differences."
+        )
+    return (
+        f'"{col_name}": {parsed_count} of {total} values ({pct}%) parsed successfully. '
+        f"{failed_count} value(s) could not be parsed and were set to NaT (Not a Time). "
+        "Check those rows for unusual date formats or invalid dates like 31 February."
+    )
