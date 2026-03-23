@@ -1,7 +1,50 @@
+# =============================================================================
+# data_inconsistencies.py
+#
+# This file handles Task 1 of DataMine: fixing column name problems and
+# data type issues in the uploaded dataset.
+#
+# It defines 6 endpoints grouped into 3 upgrade sections:
+#
+#   Upgrade A — Column names & dtypes
+#     GET  /task1/columns_info       → scan every column for issues
+#     POST /task1/update_columns     → apply renames and dtype changes
+#
+#   Upgrade B — Text value cleaning
+#     GET  /task1/text_value_info    → scan text columns for messy values
+#     POST /task1/clean_text_values  → apply a cleaning method per column
+#
+#   Upgrade C — Category harmonisation
+#     GET  /task1/category_info      → find columns where the same category
+#                                      is spelled in multiple ways
+#     POST /task1/harmonise_categories → standardise variants to one form
+# =============================================================================
+
+
+# --- Standard FastAPI imports -------------------------------------------------
+# HTTPException  → lets us return a clean error message + HTTP status code
+#                  instead of crashing with a raw Python traceback
+# APIRouter      → lets us group all Task 1 endpoints under one object (task1)
+#                  and register them all at once in main.py
 from fastapi import HTTPException, APIRouter
+
+# BaseModel is Pydantic's base class. Any class that inherits from it
+# automatically validates incoming JSON request bodies — wrong types or
+# missing fields are caught before any of our code runs.
 from pydantic import BaseModel
-from State.dfState import dataset_state              # dfState.py sits at the backend root
-from xAI.inconsistencies_explainer import (                   # all explanations live in xai/explainer.py
+
+# dataset_state is a singleton that holds the current DataFrame in memory.
+# It is shared across every router/file in the project.
+# Singleton = one shared instance — every file that imports this gets
+# the exact same object, not a copy.
+from State.dfState import dataset_state              # sits at the backend root
+
+# Each of these functions lives in xAI/inconsistencies_explainer.py.
+# They return plain-English explanation strings that the frontend displays
+# in the "Why did DataMine do this?" panel.
+# Keeping the explanation text OUT of this file means we can update
+# wording without touching cleaning logic.
+from xAI.inconsistencies_explainer import (
     explain_spaces_in_name,
     explain_special_chars,
     explain_mixed_casing,
@@ -16,12 +59,20 @@ from xAI.inconsistencies_explainer import (                   # all explanations
     explain_high_cardinality,
     explain_text_clean_result,
 )
-import pandas as pd
-import numpy as np
-import re
-from typing import Optional, Dict
+
+import pandas as pd    # main data manipulation library
+import numpy as np     # used for np.int64/np.float64 type casting and np.nan
+import re              # regular expressions — used for pattern matching in column names and values
+from typing import Optional, Dict   # type hints for Pydantic models
+
+# snapshot_store saves a copy of the DataFrame before every write operation.
+# This powers the undo/rollback system — if a change goes wrong the user
+# can roll back to any of the last 20 snapshots.
 from State.snapshotState import snapshot_store
 
+# Create the router for all Task 1 endpoints.
+# In main.py this is registered with: app.include_router(task1, prefix="/api")
+# so every route defined here is automatically prefixed with /api
 task1 = APIRouter()
 
 
@@ -39,11 +90,14 @@ def require_df() -> pd.DataFrame:
     a clear message instead.
     """
     if dataset_state.df is None:
+        # Return HTTP 400 Bad Request with a human-readable explanation.
+        # 400 means "you sent a bad request" — which is accurate here
+        # because the client called this endpoint before uploading data.
         raise HTTPException(
             status_code=400,
             detail="No dataset loaded. Please upload a file first via POST /api/dataset_info"
         )
-    return dataset_state.df
+    return dataset_state.df  # if we get here, df exists — return it safely
 
 
 def auto_clean_name(name: str) -> str:
@@ -77,12 +131,12 @@ def auto_clean_name(name: str) -> str:
         "FirstName" → "firstname"
         Always last — earlier rules don't depend on casing.
     """
-    cleaned = name.strip()
-    cleaned = re.sub(r"\s+", "_", cleaned)      # r"" prefix fixes the escape warning
-    cleaned = re.sub(r"[^\w]", "_", cleaned)    # r"" prefix fixes the escape warning
-    cleaned = re.sub(r"_+", "_", cleaned)
-    cleaned = cleaned.strip("_")
-    cleaned = cleaned.lower()
+    cleaned = name.strip()                          # Rule 1: remove edge whitespace
+    cleaned = re.sub(r"\s+", "_", cleaned)          # Rule 2: spaces → underscores. r"" prefix fixes Pylance escape warning
+    cleaned = re.sub(r"[^\w]", "_", cleaned)        # Rule 3: symbols → underscores. [^\w] = NOT (letter/digit/underscore)
+    cleaned = re.sub(r"_+", "_", cleaned)           # Rule 4: collapse runs of underscores into one
+    cleaned = cleaned.strip("_")                    # Rule 5: remove leading/trailing underscores
+    cleaned = cleaned.lower()                       # Rule 6: lowercase everything
     return cleaned
 
 
@@ -100,40 +154,48 @@ def detect_issues(original: str, dtype: str, sample_values: list) -> list:
       3. Mixed casing
       4. Numeric data disguised as text (object dtype)
     """
-    issues = []
+    issues = []  # will be populated and returned — empty means no issues
 
-    # Check 1: spaces
+    # Check 1: spaces anywhere in the column name
+    # r"\s" matches any whitespace character (space, tab, newline)
     if re.search(r"\s", original):
         issues.append(explain_spaces_in_name(original))
 
-    # Check 2: special characters
+    # Check 2: special characters in the column name
+    # re.findall returns a list of every character that is NOT a word char or space
+    # set() deduplicates so we know WHICH unique bad characters exist
     bad_chars = set(re.findall(r"[^\w\s]", original))
     if bad_chars:
         issues.append(explain_special_chars(original, bad_chars))
 
     # Check 3: mixed casing
-    # .isupper() guard avoids flagging ALL-CAPS abbreviations like "ID" or "DOB"
+    # We compare the original against its fully lowercased version.
+    # If they differ, the name has at least one uppercase letter.
+    # The .isupper() guard avoids flagging ALL-CAPS abbreviations like
+    # "ID" or "DOB" — those are intentional, not a casing mistake.
     if original != original.lower() and not original.isupper():
         issues.append(explain_mixed_casing(original))
 
-    # Check 4: numbers stored as text
-    # Strip common formatting ($, commas, %) before testing so "$4,500" is
-    # correctly identified as a number stored as a string
+    # Check 4: numbers stored as text (object dtype)
+    # We try to parse each sample value as a float after stripping common
+    # formatting symbols ($, commas, %) — so "$4,500" is correctly identified
+    # as a number disguised as a string.
+    # If ALL sample values parse successfully, the column is numeric-as-text.
     if dtype == "object" and sample_values:
         numeric_count = 0
         for v in sample_values:
             try:
                 float(
                     str(v)
-                    .replace(",", "")
-                    .replace("$", "")
-                    .replace("%", "")
+                    .replace(",", "")   # strip thousands separator
+                    .replace("$", "")   # strip currency symbol
+                    .replace("%", "")   # strip percentage symbol
                     .strip()
                 )
-                numeric_count += 1
+                numeric_count += 1     # this value parsed as a number
             except ValueError:
-                pass
-        if numeric_count == len(sample_values):
+                pass                   # this value is genuinely text — don't count it
+        if numeric_count == len(sample_values):  # every sample was numeric
             issues.append(explain_numeric_as_text(original))
 
     return issues
@@ -163,28 +225,33 @@ async def get_columns_info():
 
     This endpoint never modifies dataset_state.df. Safe to call repeatedly.
     """
-    df = require_df()
-    columns_report = []
+    df = require_df()  # get the current DataFrame, or raise 400 if none loaded
+    columns_report = []  # we'll append one dict per column and return it all
 
     for col in df.columns:
+        # Run the column name through our cleaner to get the suggested fix
         suggested = auto_clean_name(col)
 
-        # .dropna() skips missing values so samples are always real data
-        # .item() converts np.int64, np.float32 etc. to plain Python types
-        # so that FastAPI's JSON serialiser never encounters unknown types
+        # Build a list of up to 3 sample values from this column.
+        # .dropna()  → skip NaN so we only show real data values
+        # .head(3)   → cap at 3 for readability
+        # .item()    → converts numpy types (np.int64, np.float32 etc.) to
+        #              plain Python int/float so FastAPI's JSON serialiser
+        #              doesn't crash on unknown types
         sample_values = [
-            v.item() if hasattr(v, "item") else v
+            v.item() if hasattr(v, "item") else v   # .item() only exists on numpy scalars
             for v in df[col].dropna().head(3).tolist()
         ]
 
+        # Run the four issue checks defined above
         issues = detect_issues(col, str(df[col].dtype), sample_values)
 
         columns_report.append({
             "original_name":    col,
             "suggested_name":   suggested,
-            "needs_fix":        col != suggested,
+            "needs_fix":        col != suggested,   # True only if the name actually differs
             "current_dtype":    str(df[col].dtype),
-            "available_dtypes": [
+            "available_dtypes": [                   # complete list for the frontend dropdown
                 "int64",
                 "float64",
                 "object",
@@ -198,6 +265,7 @@ async def get_columns_info():
 
     return {
         "total_columns": len(df.columns),
+        # Count columns that either need a name fix OR have at least one detected issue
         "columns_with_issues": sum(
             1 for c in columns_report
             if c["needs_fix"] or c["issues_detected"]
@@ -210,6 +278,9 @@ async def get_columns_info():
 
 class ColumnUpdatePayload(BaseModel):
     """
+    Defines the shape of the JSON body for POST /task1/update_columns.
+    Pydantic validates this automatically before our function runs.
+
     auto_fix_all:
         When True, every column is renamed using auto_clean_name() at once.
         The renames dict is ignored when this is True.
@@ -222,6 +293,8 @@ class ColumnUpdatePayload(BaseModel):
         Dtype conversions to apply, independent of renames.
         e.g. {"age": "int64", "signup_date": "datetime64[ns]"}
     """
+    # Optional fields with default values — every field is optional so the
+    # user can send just renames, just dtype_changes, or both together
     auto_fix_all:  Optional[bool]           = False
     renames:       Optional[Dict[str, str]] = {}
     dtype_changes: Optional[Dict[str, str]] = {}
@@ -239,37 +312,43 @@ async def update_columns(payload: ColumnUpdatePayload):
     Errors are collected and returned rather than raised so that one
     bad conversion does not block all the other valid changes.
     """
-    df      = require_df().copy()
-    applied = []
-    errors  = []
+    df      = require_df().copy()   # .copy() is critical — we never mutate the original until we're sure everything worked
+    applied = []                    # list of success messages, one per change applied
+    errors  = []                    # list of failure messages — returned to the frontend for display
 
     # ── Renames ───────────────────────────────────────────────────────────────
 
     if payload.auto_fix_all:
+        # Build a dict of ONLY the columns that actually need renaming
+        # (skip columns where auto_clean_name gives back the same name)
         rename_map = {
             col: auto_clean_name(col)
             for col in df.columns
-            if col != auto_clean_name(col)
+            if col != auto_clean_name(col)   # only include if name would actually change
         }
         if rename_map:
-            df.rename(columns=rename_map, inplace=True)
+            df.rename(columns=rename_map, inplace=True)   # apply all renames at once — one operation
             applied.append(
                 f"Auto-fixed {len(rename_map)} column name(s): "
                 f"{list(rename_map.keys())} → {list(rename_map.values())}"
             )
         else:
+            # Nothing to do — all names were already clean. Still report success.
             applied.append("All column names are already clean — nothing to fix.")
 
     elif payload.renames:
+        # Manual renames — validate each one before applying
         valid_renames = {}
         for old_name, new_name in payload.renames.items():
             if old_name not in df.columns:
+                # Column doesn't exist — can't rename something that isn't there
                 errors.append(f'Rename failed: "{old_name}" does not exist in the dataset.')
-                continue
+                continue   # skip to the next rename, don't crash the whole request
             if not new_name or not new_name.strip():
+                # Empty or whitespace-only new name — not allowed
                 errors.append(f'Rename failed: new name for "{old_name}" is empty.')
                 continue
-            valid_renames[old_name] = new_name.strip()
+            valid_renames[old_name] = new_name.strip()  # strip any accidental whitespace
 
         if valid_renames:
             df.rename(columns=valid_renames, inplace=True)
@@ -277,9 +356,12 @@ async def update_columns(payload: ColumnUpdatePayload):
 
     # ── Dtype changes ─────────────────────────────────────────────────────────
 
+    # Loop through every requested dtype change
     for col_name, new_dtype in (payload.dtype_changes or {}).items():
 
         if col_name not in df.columns:
+            # The column name might have just been renamed in the block above,
+            # so we give a helpful tip explaining that.
             errors.append(
                 f'Dtype change failed: "{col_name}" not found. '
                 f'If you renamed it in this same request, use the new name.'
@@ -289,13 +371,13 @@ async def update_columns(payload: ColumnUpdatePayload):
         current_dtype = str(df[col_name].dtype)
 
         if current_dtype == new_dtype:
-            continue    # already correct, skip silently
+            continue    # already the correct type — skip silently, nothing to do
 
         try:
             if new_dtype == "datetime64[ns]":
                 # pd.to_datetime() handles many date string formats automatically.
-                # errors="coerce" turns unparseable values into NaT
-                # instead of crashing the whole operation.
+                # errors="coerce" turns unparseable values into NaT (Not a Time)
+                # instead of crashing the whole operation on one bad value.
                 df[col_name] = pd.to_datetime(df[col_name], errors="coerce")
                 applied.append(
                     f'"{col_name}": {current_dtype} → datetime64[ns]. '
@@ -303,23 +385,28 @@ async def update_columns(payload: ColumnUpdatePayload):
                 )
 
             elif new_dtype == "bool":
-                # FIX for Pylance error on line 377:
-                # Passing the string "bool" to .astype() confuses Pylance's type checker.
-                # Passing the actual Python type `bool` resolves it.
-                # We also handle text values manually first because .astype(bool)
-                # converts any non-empty string to True — so "False" would wrongly
-                # become True without this mapping step.
+                # WHY the manual map step:
+                # .astype(bool) on a string column converts ANY non-empty string to True —
+                # so the string "False" would wrongly become the boolean True.
+                # We handle it manually first by mapping the known text variants
+                # to the correct boolean value.
+                #
+                # Pylance fix: passing the actual Python type `bool` (not the string "bool")
+                # is what Pylance expects on .astype(). Both work at runtime, but
+                # the type literal avoids the static analysis warning.
                 df[col_name] = df[col_name].map(
                     lambda x:
                         True  if str(x).strip().lower() in ("true",  "1", "yes") else
                         False if str(x).strip().lower() in ("false", "0", "no")  else x
-                ).astype(bool)   # <-- bool type, not the string "bool"
+                ).astype(bool)   # <-- Python type `bool`, not the string "bool"
                 applied.append(
                     f'"{col_name}": {current_dtype} → bool. '
                     + explain_dtype_change_bool()
                 )
 
             elif new_dtype == "category":
+                # pandas "category" dtype stores repeated strings as integer codes
+                # internally, which saves memory when a column has few unique values.
                 df[col_name] = df[col_name].astype("category")
                 applied.append(
                     f'"{col_name}": {current_dtype} → category. '
@@ -327,19 +414,24 @@ async def update_columns(payload: ColumnUpdatePayload):
                 )
 
             elif new_dtype == "int64":
+                # Use np.int64 (the actual numpy type) not the string "int64"
+                # to satisfy Pylance's type checker
                 df[col_name] = df[col_name].astype(np.int64)
                 applied.append(f'"{col_name}": {current_dtype} → int64.')
 
             elif new_dtype == "float64":
+                # Same pattern as int64 — use the numpy type directly
                 df[col_name] = df[col_name].astype(np.float64)
                 applied.append(f'"{col_name}": {current_dtype} → float64.')
 
             else:
-                # object and any other string dtype
+                # Covers "object" and any other string dtype the user might pass
                 df[col_name] = df[col_name].astype(str)
                 applied.append(f'"{col_name}": {current_dtype} → {new_dtype}.')
 
         except (ValueError, TypeError) as e:
+            # Catch conversion failures (e.g. converting "hello" to int64)
+            # and report them rather than crashing — other valid changes still go through
             errors.append(
                 f'Could not convert "{col_name}" to {new_dtype}. '
                 f'Reason: {str(e)}. '
@@ -349,15 +441,18 @@ async def update_columns(payload: ColumnUpdatePayload):
     # ── Save back ─────────────────────────────────────────────────────────────
 
     if applied:
+        # SNAPSHOT RULE: always save BEFORE writing to dataset_state.df
+        # so the user can undo to the state that existed before this change
         snapshot_store.save(f"Task 1 — column changes ({len(applied)} update(s))", require_df())
-        dataset_state.df = df
+        dataset_state.df = df   # only write back if at least one change succeeded
 
     # ── Return ────────────────────────────────────────────────────────────────
 
     return {
-        "success": len(errors) == 0,
+        "success": len(errors) == 0,    # True only if zero errors occurred
         "applied": applied,
         "errors":  errors,
+        # Return the final column list with dtypes so the frontend can refresh its display
         "updated_columns": [
             {"name": col, "dtype": str(df[col].dtype)}
             for col in df.columns
@@ -401,61 +496,74 @@ async def infer_types():
         groups of size 1.
     """
     df         = require_df()
-    total_rows = len(df)
-    findings   = []
+    total_rows = len(df)   # used as the denominator for cardinality percentage
+    findings   = []        # list of issues found — one dict per column per issue type
 
+    # Keywords that strongly suggest a column is an identifier, not a measurement
     id_keywords = ("id", "key", "code", "uuid", "ref", "reference", "number")
 
     for col in df.columns:
-        dtype      = str(df[col].dtype)
-        unique_count = int(df[col].nunique())
+        dtype        = str(df[col].dtype)
+        unique_count = int(df[col].nunique())   # int() ensures JSON serialisable
 
         # ── Check 1: hidden boolean ───────────────────────────────────────────
+        # .dtype.kind returns a single letter for the category:
+        #   "i" = signed integer (int8, int16, int32, int64)
+        #   "f" = floating point (float32, float64)
+        # We only check numeric columns — strings and datetimes can't be hidden booleans
         if df[col].dtype.kind in ("i", "f"):
-            non_null = df[col].dropna()
-            unique_vals = set(non_null.unique())
+            non_null    = df[col].dropna()                  # skip NaN values for the check
+            unique_vals = set(non_null.unique())            # unique values as a Python set
+            # A hidden boolean has EXACTLY two unique values and they are 0 and 1
             if unique_vals <= {0, 1} and len(unique_vals) == 2:
                 findings.append({
-                    "column":      col,
-                    "finding":     "hidden_boolean",
-                    "current_dtype": dtype,
+                    "column":         col,
+                    "finding":        "hidden_boolean",
+                    "current_dtype":  dtype,
                     "suggested_dtype": "bool",
-                    "explanation": explain_hidden_boolean(col),
+                    "explanation":    explain_hidden_boolean(col),
                 })
 
         # ── Check 2: likely ID column ─────────────────────────────────────────
-        # All values unique AND name looks like an identifier
+        # Two conditions must BOTH be true:
+        #   1. Every single value is unique (nunique equals total rows)
+        #   2. The column name contains at least one known ID keyword
         if unique_count == total_rows and any(
-            kw in col.lower() for kw in id_keywords
+            kw in col.lower() for kw in id_keywords   # check all keywords against lowercased name
         ):
             findings.append({
-                "column":      col,
-                "finding":     "likely_id",
+                "column":       col,
+                "finding":      "likely_id",
                 "current_dtype": dtype,
                 "unique_count": unique_count,
-                "explanation": explain_likely_id_column(col),
+                "explanation":  explain_likely_id_column(col),
             })
 
         # ── Check 3: high cardinality text ────────────────────────────────────
-        # Object dtype AND more than 50% of values are unique
+        # Conditions:
+        #   1. dtype is object (text)
+        #   2. More than 50% of values are unique (cardinality_pct > 0.5)
+        #   3. At least 10 unique values — protects against tiny datasets
+        #      where 5/8 unique values (62.5%) is normal, not a problem
         if dtype == "object" and total_rows > 0:
-            cardinality_pct = unique_count / total_rows
+            cardinality_pct = unique_count / total_rows   # proportion 0.0–1.0
             if cardinality_pct > 0.5 and unique_count > 10:
                 findings.append({
-                    "column":       col,
-                    "finding":      "high_cardinality",
+                    "column":        col,
+                    "finding":       "high_cardinality",
                     "current_dtype": dtype,
-                    "unique_count": unique_count,
-                    "total_rows":   total_rows,
-                    "explanation":  explain_high_cardinality(
+                    "unique_count":  unique_count,
+                    "total_rows":    total_rows,
+                    "explanation":   explain_high_cardinality(
                         col, unique_count, total_rows
                     ),
                 })
 
     return {
-        "total_columns": len(df.columns),
+        "total_columns":  len(df.columns),
         "findings_count": len(findings),
-        "findings": findings,
+        "findings":       findings,
+        # Provide a summary message — friendly empty-state text if no issues found
         "message": (
             "No type inference issues found."
             if not findings else
@@ -504,68 +612,75 @@ async def get_text_value_info():
     so the user can see exactly what is wrong before cleaning.
     """
     df      = require_df()
-    reports = []
+    reports = []  # one entry per column that has at least one issue
 
-    # Only check object (text) columns — numeric cleaning is handled elsewhere
+    # select_dtypes selects only the text-based columns
+    # We skip numeric columns here — their cleaning is Task 4/5's responsibility
     text_cols = df.select_dtypes(include=["object", "category"]).columns.tolist()
 
     for col in text_cols:
-        series      = df[col].dropna().astype(str)
-        total_vals  = len(series)
+        series     = df[col].dropna().astype(str)  # drop NaN, cast to string for .str operations
+        total_vals = len(series)
 
         if total_vals == 0:
-            continue
+            continue  # empty column after dropping NaN — nothing to report
 
         # ── Whitespace issues ─────────────────────────────────────────────────
-        # A value has a whitespace issue if stripping it changes it
-        has_whitespace  = series != series.str.strip()
-        whitespace_count = int(has_whitespace.sum())
-        whitespace_samples = series[has_whitespace].head(3).tolist()
+        # Compare each value to its stripped version.
+        # If they differ, the value has leading or trailing whitespace.
+        has_whitespace   = series != series.str.strip()   # boolean mask — True where whitespace found
+        whitespace_count = int(has_whitespace.sum())      # count of affected rows
+        whitespace_samples = series[has_whitespace].head(3).tolist()  # up to 3 examples for display
 
         # ── Mixed casing ──────────────────────────────────────────────────────
-        # Lower all values and compare unique counts.
-        # If lowercased unique count < raw unique count, casing variants exist.
-        raw_unique    = series.nunique()
-        lower_unique  = series.str.lower().nunique()
-        casing_issue  = lower_unique < raw_unique
-        casing_count  = raw_unique - lower_unique
+        # If lowercasing all values reduces the number of unique values,
+        # it means some values were duplicates that only differed by casing.
+        # e.g. "Male" + "male" + "MALE" = 3 unique raw values, 1 unique lowercased value
+        raw_unique   = series.nunique()           # unique count in original casing
+        lower_unique = series.str.lower().nunique()  # unique count after lowercasing
+        casing_issue = lower_unique < raw_unique  # True if casing variants exist
+        casing_count = raw_unique - lower_unique  # how many variants are actually duplicates
 
-        # Find actual variant groups — values that are the same when lowercased
-        # but differ in the original — limited to top 3 groups for readability
+        # Build a sample of casing variant groups for display — up to 3 groups.
+        # We use groupby on the lowercased series to find all values that share
+        # the same canonical form.
         casing_samples = {}
         if casing_issue:
             grouped = series.groupby(series.str.lower())
             for canonical, group in grouped:
                 variants = group.unique().tolist()
-                if len(variants) > 1:
+                if len(variants) > 1:   # only include groups with actual variants
                     casing_samples[canonical] = variants
-                    if len(casing_samples) >= 3:
+                    if len(casing_samples) >= 3:  # stop after 3 groups
                         break
 
         # ── Special characters ────────────────────────────────────────────────
-        import re as _re
-        has_special   = series.str.contains(r"[^\w\s]", regex=True, na=False)
-        special_count = int(has_special.sum())
+        # [^\w\s] matches any character that is NOT a word character or whitespace
+        # i.e. it matches $, %, !, @, #, (, ), -, etc.
+        import re as _re   # imported again locally to make the dependency explicit in this block
+        has_special    = series.str.contains(r"[^\w\s]", regex=True, na=False)  # boolean mask
+        special_count  = int(has_special.sum())
         special_samples = series[has_special].head(3).tolist()
 
-        # Only include this column in the report if at least one issue exists
+        # Only include this column in the report if at least one issue was found.
+        # This keeps the response small for clean datasets.
         has_any_issue = (
             whitespace_count > 0 or casing_issue or special_count > 0
         )
 
         if has_any_issue:
             reports.append({
-                "column":      col,
+                "column":       col,
                 "total_values": total_vals,
 
                 "whitespace": {
                     "count":   whitespace_count,
-                    "pct":     round((whitespace_count / total_vals) * 100, 2),
+                    "pct":     round((whitespace_count / total_vals) * 100, 2),  # percentage of rows affected
                     "samples": whitespace_samples,
                 },
                 "mixed_casing": {
                     "has_issue":      casing_issue,
-                    "variant_groups": casing_count,
+                    "variant_groups": casing_count,   # how many extra variants exist beyond the canonical forms
                     "samples":        casing_samples,
                 },
                 "special_chars": {
@@ -574,13 +689,13 @@ async def get_text_value_info():
                     "samples": special_samples,
                 },
 
-                # Pre-built explanation for the xAI panel
+                # xAI explanation built from the column name and total affected count
                 "explanation": explain_text_value_cleaning(
                     col,
                     whitespace_count + (casing_count if casing_issue else 0) + special_count
                 ),
 
-                # Available cleaning methods for this column's dropdown
+                # Available methods for the frontend dropdown — shown next to this column
                 "available_methods": {
                     "trim":           "Remove leading and trailing whitespace from all values",
                     "lowercase":      "Convert all values to lowercase",
@@ -600,6 +715,8 @@ async def get_text_value_info():
 
 class TextCleanPayload(BaseModel):
     """
+    Defines the JSON body for POST /task1/clean_text_values.
+
     strategy is a dict mapping column name → cleaning method.
 
     Valid methods:
@@ -619,7 +736,7 @@ class TextCleanPayload(BaseModel):
             }
         }
     """
-    strategy: Dict[str, str]
+    strategy: Dict[str, str]   # required — no default means it must be provided
 
 
 @task1.post("/task1/clean_text_values")
@@ -652,11 +769,11 @@ async def clean_text_values(payload: TextCleanPayload):
     NaN values are preserved throughout — we only clean real values,
     not missing ones. That is Task 2's responsibility.
     """
-    df      = require_df().copy()
+    df      = require_df().copy()  # work on a copy — never mutate the original until the end
     applied = []
     errors  = []
 
-    import re as _re
+    import re as _re  # local import to make the dependency explicit
 
     for col, method in payload.strategy.items():
 
@@ -664,8 +781,11 @@ async def clean_text_values(payload: TextCleanPayload):
             errors.append(f'"{col}" not found in the dataset.')
             continue
 
+        # Check that the column is a text type before trying to clean it.
+        # .kind "O" = object (includes mixed Python types stored as objects),
+        # "S" = byte string, "U" = unicode string
         if df[col].dtype.kind not in ("O", "S", "U"):
-            # Check for object/string dtype
+            # Fallback: check the dtype name directly as a string
             if str(df[col].dtype) not in ("object", "string", "category"):
                 errors.append(
                     f'"{col}" is not a text column (dtype: {df[col].dtype}). '
@@ -674,30 +794,39 @@ async def clean_text_values(payload: TextCleanPayload):
                 continue
 
         try:
-            # Convert to string for .str accessor, preserve NaN
+            # Record which positions are NaN BEFORE cleaning.
+            # Some .str methods turn NaN into the string "nan" — we'll use this
+            # mask at the end to put real NaN values back in those positions.
             original_nulls = df[col].isna()
 
             if method == "trim":
+                # .str.strip() removes whitespace from both ends of each value
                 df[col] = df[col].str.strip()
 
             elif method == "lowercase":
+                # Strip first, then lowercase — consistent order across all methods
                 df[col] = df[col].str.strip().str.lower()
 
             elif method == "uppercase":
                 df[col] = df[col].str.strip().str.upper()
 
             elif method == "titlecase":
+                # .str.title() capitalises the first letter of each word
+                # e.g. "new york city" → "New York City"
                 df[col] = df[col].str.strip().str.title()
 
             elif method == "remove_special":
                 df[col] = (
                     df[col]
                     .str.strip()
-                    .str.replace(r"[^\w\s]", "", regex=True)
-                    .str.strip()     # strip again — removing chars can leave edge spaces
+                    .str.replace(r"[^\w\s]", "", regex=True)   # remove everything that isn't a word char or space
+                    .str.strip()     # strip again — removing chars from the middle can leave edge spaces
                 )
 
             elif method == "all":
+                # Combined method: trim → lowercase → remove special chars → trim again
+                # Order is intentional: trim first so edge spaces don't survive,
+                # lowercase before remove_special so the result is fully normalised
                 df[col] = (
                     df[col]
                     .str.strip()
@@ -707,28 +836,34 @@ async def clean_text_values(payload: TextCleanPayload):
                 )
 
             else:
+                # Unknown method name — report it and skip to the next column
                 errors.append(
                     f'"{col}": unknown method "{method}". '
                     "Valid: trim, lowercase, uppercase, titlecase, remove_special, all."
                 )
                 continue
 
-            # Restore NaN positions — .str operations can turn NaN into "nan" string
+            # Restore NaN values at their original positions.
+            # .str operations can silently convert NaN to the string "nan" —
+            # we use the mask we captured before cleaning to put real NaN back.
             df.loc[original_nulls, col] = np.nan
 
             applied.append(explain_text_clean_result(col, method))
 
         except Exception as e:
+            # Catch any unexpected error (e.g. mixed types in a column)
             errors.append(f'"{col}": unexpected error — {str(e)}')
 
     if applied:
+        # No snapshot here — text cleaning is low-risk and reversible.
+        # The snapshot is optional; add snapshot_store.save() here if needed.
         dataset_state.df = df
 
     return {
-        "success": len(errors) == 0,
-        "applied": applied,
-        "errors":  errors,
-        "new_shape": list(df.shape),
+        "success":   len(errors) == 0,
+        "applied":   applied,
+        "errors":    errors,
+        "new_shape": list(df.shape),  # list() so it serialises as a JSON array, not a tuple
     }
 
 
@@ -768,53 +903,62 @@ async def get_category_info():
     df      = require_df()
     reports = []
 
+    # Only look at text columns — category dtype is included because pandas
+    # sometimes stores low-cardinality strings as category automatically
     text_cols = df.select_dtypes(include=["object", "category"]).columns.tolist()
 
     for col in text_cols:
         series = df[col].dropna().astype(str)
 
-        # Skip high-cardinality columns — harmonisation is for categories
+        # Skip high-cardinality columns — harmonisation makes no sense when almost
+        # every value is unique (e.g. free-text comments, names, addresses)
         if series.nunique() > 50:
             continue
 
-        # Group values by their normalised form (lowercase + stripped)
-        # If any group has more than one original variant, we have a problem
+        # Build a dict: normalised_form → [list of original variants]
+        # Normalised = lowercase + stripped so "Male" and " male" map to "male"
         variant_groups = {}
         for val in series.unique():
-            normalised = val.strip().lower()
+            normalised = val.strip().lower()   # canonical key
             if normalised not in variant_groups:
                 variant_groups[normalised] = []
-            variant_groups[normalised].append(val)
+            variant_groups[normalised].append(val)  # add original spelling to this group
 
-        # Only report groups that have more than one variant
+        # Keep only groups where multiple original values share the same canonical form
+        # (i.e. they're inconsistent spellings of the same thing)
         problem_groups = {
             k: v for k, v in variant_groups.items()
-            if len(v) > 1
+            if len(v) > 1   # more than one spelling = a problem
         }
 
         if not problem_groups:
-            continue
+            continue  # column is consistent — nothing to report
 
-        # For each problem group, count how many rows have each variant
-        # and suggest the most frequent one as the canonical form
+        # For each problem group: count occurrences of each variant and
+        # suggest the most frequent one as the canonical form to keep
         group_details = []
         for normalised, variants in problem_groups.items():
+            # Count how many rows contain each variant
             counts = {
-                v: int((series == v).sum())
+                v: int((series == v).sum())   # int() for JSON serialisation
                 for v in variants
             }
-            # The canonical suggestion is the most frequently occurring variant
+            # The suggested canonical is simply the most common existing variant.
+            # max() with a key function finds the variant with the highest count.
             suggested_canonical = max(counts, key=lambda k: counts.get(k, 0))
             group_details.append({
-                "variants":          variants,
-                "counts":            counts,
+                "variants":            variants,
+                "counts":              counts,
                 "suggested_canonical": suggested_canonical,
-                "normalised_key":    normalised,
+                "normalised_key":      normalised,
             })
 
         reports.append({
             "column":         col,
             "problem_groups": group_details,
+            # total_affected = rows that would change if the user harmonises.
+            # For each group: total rows in the group MINUS the rows already on
+            # the most common variant (those don't need to change).
             "total_affected": sum(
                 sum(g["counts"].values()) - max(g["counts"].values())
                 for g in group_details
@@ -834,6 +978,8 @@ async def get_category_info():
 
 class HarmonisePayload(BaseModel):
     """
+    Defines the JSON body for POST /task1/harmonise_categories.
+
     column:  the column to harmonise
     mapping: a dict of variant → canonical form
 
@@ -855,8 +1001,8 @@ class HarmonisePayload(BaseModel):
     will be replaced with the corresponding value.
     Values not in the mapping are left unchanged.
     """
-    column:  str
-    mapping: Dict[str, str]
+    column:  str              # which column to operate on
+    mapping: Dict[str, str]   # variant → canonical. e.g. {"male": "Male", "M": "Male"}
 
 
 @task1.post("/task1/harmonise_categories")
@@ -877,32 +1023,35 @@ async def harmonise_categories(payload: HarmonisePayload):
     col = payload.column
 
     if col not in df.columns:
+        # Raise immediately — there is nothing else to attempt if the column is missing
         raise HTTPException(
             status_code=400,
             detail=f'Column "{col}" not found in the dataset.'
         )
 
+    # Capture the unique count before the change so we can report the reduction
     original_uniques = int(df[col].nunique())
 
-    # Map variants to canonical forms.
-    # For values not in the mapping, keep the original value.
-    # .map() returns NaN for unmapped values, so we fill those back
-    # with the original values using .combine_first()
+    # .map(payload.mapping) replaces every value found in the mapping dict.
+    # For values NOT in the mapping, .map() returns NaN by default.
+    # .combine_first(df[col]) fills those NaN positions back with the
+    # original values, effectively leaving unmapped values untouched.
     mapped = df[col].map(payload.mapping)
     df[col] = mapped.combine_first(df[col])
 
     new_uniques = int(df[col].nunique())
-    reduced_by  = original_uniques - new_uniques
+    reduced_by  = original_uniques - new_uniques  # how many variants were collapsed
 
+    # Save a snapshot BEFORE writing back — required by the project snapshot pattern
     snapshot_store.save(f"Task 1 — harmonised categories in '{col}'", require_df())
-    dataset_state.df = df
+    dataset_state.df = df  # write the cleaned DataFrame back to shared state
 
     return {
-        "success":          True,
-        "column":           col,
-        "variants_before":  original_uniques,
-        "variants_after":   new_uniques,
-        "reduced_by":       reduced_by,
+        "success":         True,
+        "column":          col,
+        "variants_before": original_uniques,
+        "variants_after":  new_uniques,
+        "reduced_by":      reduced_by,
         "applied": [
             f'"{col}": harmonised {len(payload.mapping)} variant(s) '
             f'into {len(set(payload.mapping.values()))} canonical form(s). '
