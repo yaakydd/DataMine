@@ -1,0 +1,18 @@
+of every decision.
+The file has three layers.
+The two helper functions at the top — require_df() and auto_clean_name() — are pure utility. They don't touch any endpoint logic. detect_issues() sits just below them and is the xAI brain of this task. It doesn't fix anything, it just looks, thinks, and explains.
+auto_clean_name() — why the order of the 6 rules matters.
+Rules 1 and 2 must come before Rule 3. If you ran Rule 3 first — replacing all non-word characters — spaces would become underscores, but so would nothing else in a useful way. By handling spaces explicitly in Rule 2 first, the intent is clear. Rule 4 must come after Rule 3 because Rule 3 is what creates multiple consecutive underscores. Rule 5 must come after Rule 4 because collapsing ___ into _ might leave you with a leading or trailing single _. Rule 6 is always last because none of the earlier rules care about casing.
+detect_issues() — the xAI layer.
+Check 4 is the most interesting. A column called "age" with dtype object looks fine by name, but if its values are "25", "31", "28", it's actually a numeric column disguised as text. The trick is stripping $, %, and commas before calling float() — otherwise "$4,500" would fail the float test and get missed.
+update_columns() — why .copy() is the most important line.
+If you work directly on dataset_state.df, a failed dtype conversion halfway through leaves your data in a half-changed, unrecoverable state. .copy() means the original is always safe. dataset_state.df = df only runs at the very end, and only if something actually changed.
+
+d a file, edited a file, read a fileViewed a file, edited a file, read a fileFixed. Now let me explain what the full code does end to end, since you asked.
+
+dfState.py import — from dfState import dataset_state pulls in that single shared DataFrame instance that the upload endpoint already stored the data into. Every task file does this same import.
+auto_clean_name() — takes a messy column name like "First Name ($)" and runs it through 6 rules in sequence to produce "first_name". The rules must run in that exact order — each one sets up the next.
+detect_issues() — looks at one column and checks for 4 problems: spaces in the name, special characters, mixed casing, and numbers hiding inside a text column. For each problem it finds, it calls a function from xai/explainer.py which returns the plain-English explanation. The detection logic and the explanation words are completely separate — that's the whole point of the xai folder.
+GET /task1/columns_info — loops through every column in the DataFrame, runs auto_clean_name() and detect_issues() on each one, and returns a full report. It never touches the data, only reads it. The frontend uses this to render the columns table with suggested names and issue explanations already filled in.
+POST /task1/update_columns — this is the only endpoint that modifies anything. It takes a .copy() of the DataFrame first so the original is always safe. Then it applies renames and dtype changes one by one, collecting errors without stopping. At the very end it writes dataset_state.df = df — only if at least one change succeeded. Returns the updated column list so the frontend can re-render without making another GET request.
+xai/explainer.py — stores nothing but strings. Every explanation for Task 1 lives there as its own function. When you want to improve how something is explained to the user, you only touch this file, never the logic file.
