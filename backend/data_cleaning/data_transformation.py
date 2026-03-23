@@ -41,6 +41,48 @@ def require_df() -> pd.DataFrame:
     return dataset_state.df
 
 
+def _skew(series: pd.Series) -> float:
+    """
+    Computes Fisher's corrected skewness as a guaranteed plain Python float.
+
+    Why we don't use series.skew() directly:
+        series.skew() returns pandas Scalar — a wide union that includes
+        str, bool, datetime, complex etc. Neither float() nor .item() satisfies
+        Pylance because most of those types support neither operation.
+
+    The fix — compute skewness manually on a plain numpy array:
+        series.to_numpy(dtype=float) gives a clean np.ndarray[float64].
+        All numpy array operations (.mean(), .std()) return np.float64.
+        np.float64 always has .item() → plain Python float.
+        This completely bypasses the pandas Scalar type system.
+
+    The formula is Fisher's corrected skewness — identical to pandas .skew():
+        skew = mean( ((x - mean) / std)^3 )
+        corrected = skew * sqrt(n * (n-1)) / (n - 2)
+    """
+    # Convert to plain float64 numpy array, dropping NaN
+    arr = series.to_numpy(dtype=float, na_value=np.nan)
+    arr = arr[~np.isnan(arr)]
+
+    if len(arr) < 3:
+        return 0.0
+
+    n    = len(arr)
+    mean = float(arr.mean())   # arr.mean() → np.float64 → float: clean
+    std  = float(arr.std())    # arr.std()  → np.float64 → float: clean
+
+    if std == 0.0:
+        return 0.0
+
+    # Standardised cube — each element is np.float64, so the result is ndarray[float64]
+    standardised = ((arr - mean) / std) ** 3
+    skew_raw     = float(standardised.mean())
+
+    # Fisher's sample correction factor — same formula pandas uses
+    correction   = ((n * (n - 1)) ** 0.5) / (n - 2)
+    return skew_raw * correction
+
+
 # =============================================================================
 # TASK 5 — SKEWED DATA AND TRANSFORMATIONS
 # =============================================================================
@@ -102,7 +144,7 @@ async def get_skewness_info():
             })
             continue
 
-        skewness       = round(float(series.skew()), 4)
+        skewness       = round(_skew(series), 4)
         classification = classify_skewness(skewness)
         has_zeros      = bool((series == 0).any())
         has_negatives  = bool((series < 0).any())
@@ -225,7 +267,7 @@ async def fix_skewness(payload: SkewnessFixPayload):
             )
             continue
 
-        skew_before = round(float(series.skew()), 4)
+        skew_before = round(_skew(series), 4)
 
         try:
             if method == "log":
@@ -262,30 +304,40 @@ async def fix_skewness(payload: SkewnessFixPayload):
                         "Use yeojohnson instead."
                     )
                     continue
-                transformed, lam = stats.boxcox(series)
+
+                # stats.boxcox() stubs have ambiguous return type.
+                # Index by position to avoid tuple-size mismatch.
+                # np.float64(...).item() converts the lambda to a plain float
+                # regardless of what Pylance thinks the type is.
+                bc_result   = stats.boxcox(series)
+                transformed = np.asarray(bc_result[0])
+                lam: float  = np.float64(bc_result[1]).item()
+
                 result = df[col].copy()
                 result[result.notna()] = transformed
                 df[col] = result
+
+                skew_after = round(_skew(df[col].dropna()), 4)
                 applied.append(
                     f'"{col}": Box-Cox applied. Optimal lambda = {lam:.4f}. '
-                    + explain_transform_result(
-                        col, "Box-Cox", skew_before,
-                        round(float(df[col].dropna().skew()), 4)
-                    )
+                    + explain_transform_result(col, "Box-Cox", skew_before, skew_after)
                 )
                 continue
 
             elif method == "yeojohnson":
-                transformed, lam = stats.yeojohnson(series)
+                yj_result   = stats.yeojohnson(series)
+                transformed = np.asarray(yj_result[0])
+                lam_raw     = yj_result[1]
+                lam         = float(np.asarray(lam_raw).flat[0])
+
                 result = df[col].copy()
                 result[result.notna()] = transformed
                 df[col] = result
+
+                skew_after = round(_skew(df[col].dropna()), 4)
                 applied.append(
                     f'"{col}": Yeo-Johnson applied. Optimal lambda = {lam:.4f}. '
-                    + explain_transform_result(
-                        col, "Yeo-Johnson", skew_before,
-                        round(float(df[col].dropna().skew()), 4)
-                    )
+                    + explain_transform_result(col, "Yeo-Johnson", skew_before, skew_after)
                 )
                 continue
 
@@ -315,7 +367,7 @@ async def fix_skewness(payload: SkewnessFixPayload):
                 )
                 continue
 
-            skew_after = round(float(df[col].dropna().skew()), 4)
+            skew_after = round(_skew(df[col].dropna()), 4)
             applied.append(
                 explain_transform_result(col, method, skew_before, skew_after)
             )
@@ -598,10 +650,11 @@ async def parse_dates(payload: DateParsePayload):
     Converts specified text columns to datetime64[ns].
 
     If date_format is provided, pandas parses strictly using that template.
-    If not, pandas uses automatic format inference — slower but handles
-    mixed formats within the same column.
-
+    If not, pandas uses automatic format inference.
     Values that cannot be parsed become NaT (Not a Time).
+
+    Note: infer_datetime_format was removed in pandas 2.2.
+    pandas now infers formats automatically — no flag needed.
     """
     df      = require_df().copy()
     applied = []
@@ -629,7 +682,6 @@ async def parse_dates(payload: DateParsePayload):
             else:
                 df[col] = pd.to_datetime(
                     df[col],
-                    infer_datetime_format=True,
                     errors="coerce",
                 )
 

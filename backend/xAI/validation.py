@@ -628,3 +628,90 @@ def explain_fix_drop_rows(col_name: str, violation_count: int) -> str:
         f"Use this when the entire row is unreliable because of this violation — "
         f"not just this one column value."
     )
+
+# =============================================================================
+# TASK 6 UPGRADES — paste at the bottom of your validation_explainer.py
+# =============================================================================
+
+def explain_what_cross_column_validation_is() -> str:
+    return (
+        "Cross-column validation checks whether two columns make logical sense "
+        "together — not just whether each one is valid on its own. "
+        "A single column can pass all individual checks and still produce "
+        "impossible combinations with another column. "
+        "For example: an end_date that is before a start_date, "
+        "an age of 25 combined with a birth_year of 1950, "
+        "or a salary marked as part-time that is higher than full-time salaries. "
+        "These errors are invisible to single-column validation but "
+        "will silently corrupt any analysis that uses both columns together."
+    )
+
+
+def explain_date_range_violation(
+    col_name: str,
+    violation_count: int,
+    min_year: int,
+    max_year: int,
+) -> str:
+    return (
+        f'"{col_name}" has {violation_count} date(s) outside the expected range '
+        f"[{min_year}, {max_year}]. "
+        "Dates outside this range are likely data entry errors or system defaults. "
+        "A common source is the Unix epoch default — January 1, 1970 — "
+        "which appears when a date field is left blank in some systems. "
+        "Another common source is copy-paste errors that produce dates "
+        "centuries in the past or future."
+    )
+
+
+def explain_end_before_start_violation(
+    start_col: str,
+    end_col: str,
+    violation_count: int,
+) -> str:
+    return (
+        f"{violation_count} row(s) have '{end_col}' before '{start_col}'. "
+        "An end date must always be on or after the start date — "
+        "a negative duration is logically impossible. "
+        "This usually means the two columns were swapped during data entry, "
+        "or one of the dates was entered incorrectly."
+    )
+
+
+def explain_age_birth_year_violation(
+    age_col: str,
+    birth_year_col: str,
+    violation_count: int,
+) -> str:
+    return (
+        f"{violation_count} row(s) have inconsistent values between "
+        f"'{age_col}' and '{birth_year_col}'. "
+        "The age should approximately equal the current year minus the birth year. "
+        "A large discrepancy usually means one of the columns was entered incorrectly, "
+        "or the age column was not updated when the dataset was refreshed."
+    )
+
+
+def explain_pattern_violation(
+    col_name: str,
+    pattern_name: str,
+    violation_count: int,
+) -> str:
+    return (
+        f'"{col_name}" has {violation_count} value(s) that do not match '
+        f"the expected {pattern_name} format. "
+        "These values may still be usable as free text, but if this column "
+        "is meant to contain structured data like email addresses or phone numbers, "
+        "the malformed values will cause failures when used for lookups, "
+        "communications, or joins with other systems."
+    )
+
+
+def explain_fix_set_null_cross(col_name: str, other_col: str) -> str:
+    return (
+        f"Setting the violating values in '{col_name}' to NaN. "
+        f"The rows where '{col_name}' and '{other_col}' are logically inconsistent "
+        "will have the value in '{col_name}' cleared. "
+        "Use this when you cannot determine which of the two columns is wrong — "
+        "NaN is honest about the uncertainty."
+    )
