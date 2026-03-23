@@ -1,30 +1,75 @@
+# =============================================================================
+# duplicates.py
+#
+# This file handles Task 3 of DataMine: detecting and removing duplicate rows
+# in the uploaded dataset.
+#
+# It defines 2 endpoints:
+#
+#   GET  /task3/duplicates_info  → scan the DataFrame for full and partial
+#                                  duplicate rows, return counts, percentages,
+#                                  sample rows, and xAI explanations for every
+#                                  fix strategy. Never modifies the data.
+#
+#   POST /task3/fix_duplicates   → apply the user's chosen removal strategy:
+#                                  keep_first, keep_last, drop_all, do_nothing.
+#                                  Can target all columns or a specific subset.
+# =============================================================================
+
+
+# HTTPException → return a clean error + HTTP status code instead of a Python crash
+# APIRouter     → groups all Task 3 endpoints under one object registered in main.py
 from fastapi import HTTPException, APIRouter
+
+# BaseModel → Pydantic base class that auto-validates incoming JSON request bodies
 from pydantic import BaseModel
+
+# Shared singleton holding the current DataFrame in memory across all routers
 from State.dfState import dataset_state
+
+# Each function returns a plain-English explanation string for the xAI panel.
+# Keeping explanation text out of this file means wording can change
+# without touching cleaning logic.
 from xAI.duplicates_explainer import (
-    explain_duplicates_overview,
-    explain_duplicates_if_you_keep_first,
-    explain_duplicates_if_you_keep_last,
-    explain_duplicates_if_you_drop_all,
-    explain_duplicates_if_you_do_nothing,
-    explain_subset_duplicates,
+    explain_duplicates_overview,              # top-level summary of what was found
+    explain_duplicates_if_you_keep_first,     # what keeping the first occurrence means
+    explain_duplicates_if_you_keep_last,      # what keeping the last occurrence means
+    explain_duplicates_if_you_drop_all,       # what dropping every copy means
+    explain_duplicates_if_you_do_nothing,     # what leaving duplicates in place means
+    explain_subset_duplicates,                # what it means when a specific column has duplicates
 )
-import pandas as pd
-import numpy as np
+
+import pandas as pd   # main data manipulation library
+import numpy as np    # used for numpy type detection in safe_json()
+
+# Optional → marks fields that don't have to be provided in the request body
+# List    → type hint for the subset column list
 from typing import Optional, List
+
+# Snapshot store saves a copy of the DataFrame before every write.
+# Powers the undo/rollback system — up to 20 snapshots are kept.
 from State.snapshotState import snapshot_store
 
+# All Task 3 endpoints are attached to this router.
+# main.py registers it with: app.include_router(task3, prefix="/api")
 task3 = APIRouter()
 
 
 # =============================================================================
-# HELPER
+# HELPER FUNCTIONS
 # =============================================================================
 
 def require_df() -> pd.DataFrame:
+    """
+    Called at the start of every endpoint to guard against missing uploads.
+
+    If no file has been uploaded, dataset_state.df is None and any pandas
+    operation would crash with a confusing AttributeError deep in a library.
+    This catches it early and returns a clear HTTP 400 instead.
+    """
     if dataset_state.df is None:
         raise HTTPException(
-            status_code=400,
+            status_code=400,   # 400 = Bad Request — the client called this before uploading
             detail="No dataset loaded. Please upload a file first via POST /api/dataset_info"
         )
     return dataset_state.df
@@ -32,28 +77,50 @@ def require_df() -> pd.DataFrame:
 
 def safe_json(obj):
     """
-    Converts numpy/pandas types to plain Python so FastAPI can serialise
-    the response to JSON without errors. Called on sample rows before
-    returning them so the frontend always receives clean, readable data.
+    Recursively converts numpy and pandas types to plain Python equivalents
+    so FastAPI's JSON serialiser never encounters a type it doesn't know.
+
+    Why this is needed:
+        When we pull rows out of a DataFrame with .to_dict(), the values are
+        still numpy types — np.int64, np.float64, np.bool_, etc.
+        Python's built-in json module (which FastAPI uses) does not know
+        how to handle these and will raise a TypeError.
+        safe_json() walks the entire object and converts every numpy type
+        to its plain Python equivalent before we return it.
+
+    Handles:
+        dict       → recurse into each value
+        list       → recurse into each item
+        np.integer → int()
+        np.floating → float(), or None if the value is NaN or Inf
+                      (JSON has no representation for NaN/Inf)
+        np.bool_   → bool()
+        np.ndarray → convert to list first, then recurse
+        pd.NA / pd.NaT / float('nan') → None
+                      (JSON null is the correct representation of missing)
+        anything else → return as-is (already a plain Python type)
     """
     if isinstance(obj, dict):
-        return {k: safe_json(v) for k, v in obj.items()}
+        return {k: safe_json(v) for k, v in obj.items()}   # recurse into dict values
     if isinstance(obj, list):
-        return [safe_json(v) for v in obj]
+        return [safe_json(v) for v in obj]                 # recurse into list items
     if isinstance(obj, np.integer):
-        return int(obj)
+        return int(obj)         # np.int64(5) → 5
     if isinstance(obj, np.floating):
+        # JSON cannot represent NaN or Infinity — convert them to null instead
         return None if (np.isnan(obj) or np.isinf(obj)) else float(obj)
     if isinstance(obj, np.bool_):
-        return bool(obj)
+        return bool(obj)        # np.bool_(True) → True
     if isinstance(obj, np.ndarray):
-        return safe_json(obj.tolist())
+        return safe_json(obj.tolist())   # convert array to list, then recurse
     try:
+        # pd.isna() catches pd.NA, pd.NaT, float('nan'), and None all at once
         if pd.isna(obj):
-            return None
+            return None         # JSON null for any missing value
     except (TypeError, ValueError):
+        # pd.isna() raises on some types (e.g. lists) — ignore and fall through
         pass
-    return obj
+    return obj   # already a plain Python type — return unchanged
 
 
 # =============================================================================
@@ -89,14 +156,14 @@ async def get_duplicates_info():
       so the first appearance is never counted as a duplicate itself.
 
     What the response contains:
-      - total_rows:       total number of rows in the dataset
-      - duplicate_count:  how many rows are duplicates (not counting the original)
-      - duplicate_pct:    what percentage of total rows are duplicates
+      - total_rows:        total number of rows in the dataset
+      - duplicate_count:   how many rows are duplicates (not counting the original)
+      - duplicate_pct:     what percentage of total rows are duplicates
       - sample_duplicates: up to 5 example duplicate rows so the user can
                            see what is actually being flagged
-      - all_strategies:   every available fix with its own xAI explanation
-      - subset_report:    a check on commonly important column combinations
-                          to catch partial duplicates the user might not notice
+      - all_strategies:    every available fix with its own xAI explanation
+      - subset_report:     a check on commonly important column combinations
+                           to catch partial duplicates the user might not notice
 
     The frontend uses this to render:
       - A summary banner with counts and percentage
@@ -109,25 +176,31 @@ async def get_duplicates_info():
 
     # ── Full duplicate detection ──────────────────────────────────────────────
 
-    # df.duplicated() returns a boolean Series — True for every row that is
-    # an exact copy of a previous row. keep="first" means the FIRST occurrence
-    # is marked False (not a duplicate) and all later copies are marked True.
+    # df.duplicated() returns a boolean Series where True means that row
+    # is an exact copy of a previous row.
+    # keep="first" → the FIRST time a row appears it is marked False (not a duplicate).
+    #                Every subsequent copy of that same row is marked True.
+    # This means the count we get is: "how many rows are redundant copies"
+    # and does NOT count the originals.
     duplicate_mask  = df.duplicated(keep="first")
-    duplicate_count = int(duplicate_mask.sum())
+    duplicate_count = int(duplicate_mask.sum())   # count of True values = number of duplicate rows
     duplicate_pct   = round((duplicate_count / total_rows) * 100, 2)
 
-    # Get up to 5 sample duplicate rows so the user can see real examples.
-    # safe_json() converts numpy types so the rows serialise cleanly.
+    # Pull up to 5 real duplicate rows as examples for the user to inspect.
+    # df[duplicate_mask] filters to only the rows flagged as duplicates.
+    # .head(5) caps at 5 rows — we don't want to flood the frontend with data.
+    # .to_dict(orient="records") converts to a list of dicts, one per row.
+    # safe_json() then converts numpy types to plain Python for JSON serialisation.
     sample_duplicates = safe_json(
         df[duplicate_mask].head(5).to_dict(orient="records")
     )
 
     # ── Build strategies ──────────────────────────────────────────────────────
 
-    # Every strategy gets its label (shown in the dropdown) and its
-    # explanation (shown beneath the dropdown when that option is selected).
-    # The frontend renders these without needing any hardcoded strings.
-
+    # Each strategy is a dict with a "label" (shown in the dropdown) and an
+    # "explanation" (shown beneath the dropdown when that option is selected).
+    # Keeping these here means the frontend never has hardcoded strings —
+    # it just renders whatever label/explanation the API returns.
     all_strategies = {
         "keep_first": {
             "label":       "Keep first occurrence, remove copies",
@@ -149,29 +222,32 @@ async def get_duplicates_info():
 
     # ── Subset duplicate detection ────────────────────────────────────────────
 
-    # Full-row duplicates are obvious, but partial duplicates on key columns
-    # are often more meaningful. For example, two rows with the same email
-    # address probably represent the same person even if other fields differ.
+    # Full-row duplicates require every column to match.
+    # But often the more meaningful question is: does a column that SHOULD
+    # be unique (like email, phone, user_id) contain repeated values?
     #
-    # We automatically check every column whose name suggests it should be
-    # unique: anything containing "id", "email", "phone", "name", "code",
-    # or "number". If we find duplicates on those columns we flag them.
+    # Two rows with the same email are almost certainly the same person,
+    # even if other fields like "notes" or "signup_date" differ.
     #
-    # This is the xAI layer — we don't just report numbers, we point out
-    # patterns the user might not have thought to look for.
-
-    subset_report = []
+    # We scan column names for identity-related keywords and check each
+    # one for duplicates automatically — this is the xAI layer flagging
+    # issues the user might not have thought to look for themselves.
+    subset_report    = []
     identity_keywords = ("id", "email", "phone", "name", "code", "number")
 
+    # Build a list of columns whose names suggest they should be unique
     identity_cols = [
         col for col in df.columns
         if any(kw in col.lower() for kw in identity_keywords)
     ]
 
     for col in identity_cols:
-        # Count rows where this single column has a repeated value
+        # Check how many rows have a repeated value in this specific column.
+        # subset=[col] limits the duplicate check to this one column only.
+        # keep="first" means we count copies — not the first occurrence itself.
         subset_dup_count = int(df.duplicated(subset=[col], keep="first").sum())
         if subset_dup_count > 0:
+            # Only report if there are actual duplicates in this column
             subset_report.append({
                 "column":      col,
                 "dup_count":   subset_dup_count,
@@ -179,26 +255,26 @@ async def get_duplicates_info():
             })
 
     return {
-        # Summary numbers for the top banner
-        "total_rows":       total_rows,
-        "duplicate_count":  duplicate_count,
-        "duplicate_pct":    duplicate_pct,
+        # Summary numbers for the top banner in the UI
+        "total_rows":      total_rows,
+        "duplicate_count": duplicate_count,
+        "duplicate_pct":   duplicate_pct,
 
-        # Sample rows — up to 5 examples of actual duplicate rows
+        # Up to 5 real example rows so the user can see what's being flagged
         "sample_duplicates": sample_duplicates,
 
-        # The top-level explanation of what duplicates mean in this dataset
+        # High-level explanation of the overall duplicate situation
         "overview_explanation": explain_duplicates_overview(
             duplicate_count, total_rows, duplicate_pct
         ),
 
-        # All strategies with labels and explanations for the frontend
+        # All four strategies with labels and explanations for the frontend
         "all_strategies": all_strategies,
 
-        # Partial duplicate warnings on identity-like columns
+        # Partial duplicate warnings for identity-like columns
         "subset_report":  subset_report,
 
-        # Convenience flag for the frontend — no need to check dup_count == 0
+        # Convenience boolean — the frontend can check this instead of dup_count == 0
         "has_duplicates": duplicate_count > 0,
     }
 
@@ -207,6 +283,9 @@ async def get_duplicates_info():
 
 class DuplicateFixPayload(BaseModel):
     """
+    Defines the shape of the JSON body for POST /task3/fix_duplicates.
+    Pydantic validates this automatically before our function runs.
+
     method:
         One of: keep_first, keep_last, drop_all, do_nothing
 
@@ -223,8 +302,8 @@ class DuplicateFixPayload(BaseModel):
     Example — deduplicate based on email column only:
         {"method": "keep_first", "subset": ["email"]}
     """
-    method: str
-    subset: Optional[List[str]] = None
+    method: str                          # required — must be one of the four valid options
+    subset: Optional[List[str]] = None   # optional — None means compare all columns
 
 
 @task3.post("/task3/fix_duplicates")
@@ -233,7 +312,7 @@ async def fix_duplicates(payload: DuplicateFixPayload):
     Applies the user's chosen duplicate removal strategy.
 
     Works on a .copy() as always — dataset_state.df is only overwritten
-    at the end if the operation succeeds.
+    at the end if the operation succeeds and the method was not do_nothing.
 
     keep_first:
         df.drop_duplicates(keep="first") keeps the first occurrence of
@@ -248,26 +327,31 @@ async def fix_duplicates(payload: DuplicateFixPayload):
     drop_all:
         df.drop_duplicates(keep=False) removes EVERY row that has a
         duplicate — including the original first occurrence.
-        This is stricter than keep_first/keep_last.
+        This is the strictest option and removes the most rows.
 
     do_nothing:
         Returns immediately without modifying anything. The response
-        still includes the current shape and missing count so the
-        frontend can update its state display.
+        still includes the current shape so the frontend can update
+        its state display consistently.
 
     subset handling:
         When the user provides a subset list, pandas only looks at those
         columns when deciding if two rows are duplicates. All other columns
         are ignored in the comparison.
     """
-    df      = require_df().copy()
-    applied = []
-    errors  = []
+    df      = require_df().copy()   # .copy() — never mutate the live DataFrame until we're sure
+    applied = []                    # success messages — one per change applied
+    errors  = []                    # failure messages — returned to the frontend
 
     method = payload.method
+    # If subset is an empty list, treat it as None (use all columns)
     subset = payload.subset if payload.subset else None
 
-    # Validate subset columns exist before doing anything
+    # ── Validate subset columns ───────────────────────────────────────────────
+
+    # Check all requested subset columns exist BEFORE doing any work.
+    # Failing early is better than partially modifying the DataFrame and
+    # then discovering a column name was wrong.
     if subset:
         missing_cols = [col for col in subset if col not in df.columns]
         if missing_cols:
@@ -276,13 +360,20 @@ async def fix_duplicates(payload: DuplicateFixPayload):
                 detail=f"Subset column(s) not found in dataset: {missing_cols}"
             )
 
+    # Record the row count before any changes — needed to calculate rows_removed
     before = len(df)
 
     try:
         if method == "keep_first":
+            # drop_duplicates(keep="first") removes all rows that are duplicates
+            # of an earlier row, keeping only the first occurrence of each group.
+            # subset=subset passes the column list (or None for all columns).
             df.drop_duplicates(keep="first", subset=subset, inplace=True)
+            # reset_index(drop=True) renumbers the index from 0 after row removal.
+            # drop=True means the old index is discarded, not added as a new column.
             df.reset_index(drop=True, inplace=True)
             rows_removed = before - len(df)
+            # Build a human-readable description of what was compared
             scope = f"columns {subset}" if subset else "all columns"
             applied.append(
                 f"Removed {rows_removed} duplicate row(s) based on {scope}. "
@@ -291,6 +382,9 @@ async def fix_duplicates(payload: DuplicateFixPayload):
             )
 
         elif method == "keep_last":
+            # keep="last" is the reverse — the LAST occurrence is kept and all
+            # earlier duplicates are removed. Useful when data is time-ordered
+            # and the most recent entry is the authoritative one.
             df.drop_duplicates(keep="last", subset=subset, inplace=True)
             df.reset_index(drop=True, inplace=True)
             rows_removed = before - len(df)
@@ -302,6 +396,9 @@ async def fix_duplicates(payload: DuplicateFixPayload):
             )
 
         elif method == "drop_all":
+            # keep=False is the strictest option — it removes EVERY row that has
+            # any duplicate, including the first occurrence itself.
+            # Use this when you want only rows that are completely unique.
             df.drop_duplicates(keep=False, subset=subset, inplace=True)
             df.reset_index(drop=True, inplace=True)
             rows_removed = before - len(df)
@@ -313,11 +410,14 @@ async def fix_duplicates(payload: DuplicateFixPayload):
             )
 
         elif method == "do_nothing":
+            # User chose to leave duplicates in place.
+            # We still log it so the applied list reflects the full request.
             applied.append(
                 f"No changes made. Dataset still contains {before} rows."
             )
 
         else:
+            # Unknown method name — raise immediately with the valid options listed
             raise HTTPException(
                 status_code=400,
                 detail=(
@@ -327,23 +427,32 @@ async def fix_duplicates(payload: DuplicateFixPayload):
             )
 
     except HTTPException:
-        raise   # re-raise FastAPI errors as-is
+        raise   # re-raise FastAPI HTTP errors as-is — don't swallow them into the errors list
     except Exception as e:
+        # Any unexpected runtime error is caught and reported, not re-raised,
+        # so a single failure returns a clear message rather than a 500 crash
         errors.append(f"Unexpected error: {str(e)}")
 
     # ── Save back ─────────────────────────────────────────────────────────────
 
+    # Only save back if:
+    #   1. The method was not "do_nothing" (no actual change was made)
+    #   2. No errors occurred during the operation
     if method != "do_nothing" and not errors:
+        # SNAPSHOT RULE: save BEFORE writing to dataset_state.df
+        # require_df() still returns the old unmodified DataFrame at this point
+        # because dataset_state.df has not been overwritten yet
         snapshot_store.save(f"Task 3 — duplicates removed ({method})", require_df())
-        dataset_state.df = df
+        dataset_state.df = df   # now write the cleaned copy back to shared state
 
     # ── Return ────────────────────────────────────────────────────────────────
 
     return {
-        "success":           len(errors) == 0,
-        "applied":           applied,
-        "errors":            errors,
-        "rows_removed":      before - len(df),
-        "new_shape":         list(df.shape),
+        "success":      len(errors) == 0,       # True only if zero errors occurred
+        "applied":      applied,
+        "errors":       errors,
+        "rows_removed": before - len(df),        # how many rows were actually deleted
+        "new_shape":    list(df.shape),           # list() so it serialises as a JSON array
+        # Recount missing cells on the final df for the frontend summary card
         "remaining_missing": int(df.isnull().sum().sum()),
     }

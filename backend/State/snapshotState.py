@@ -17,7 +17,6 @@ The rest is handled here.
 """
 
 from __future__ import annotations
-
 import datetime
 from typing import Optional
 import pandas as pd
