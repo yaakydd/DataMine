@@ -63,7 +63,7 @@ from xAI.inconsistencies_explainer import (
 import pandas as pd    # main data manipulation library
 import numpy as np     # used for np.int64/np.float64 type casting and np.nan
 import re              # regular expressions — used for pattern matching in column names and values
-from typing import Optional, Dict   # type hints for Pydantic models
+from typing import Optional, Dict, List  # type hints for Pydantic models
 
 # snapshot_store saves a copy of the DataFrame before every write operation.
 # This powers the undo/rollback system — if a change goes wrong the user
@@ -1042,10 +1042,11 @@ async def harmonise_categories(payload: HarmonisePayload):
     new_uniques = int(df[col].nunique())
     reduced_by  = original_uniques - new_uniques  # how many variants were collapsed
 
-    # Save a snapshot BEFORE writing back — required by the project snapshot pattern
+# Save a snapshot BEFORE writing back — required by the project snapshot pattern
     snapshot_store.save(f"Task 1 — harmonised categories in '{col}'", require_df())
     dataset_state.df = df  # write the cleaned DataFrame back to shared state
 
+    # harmonise_categories returns here — this is its ONLY return statement
     return {
         "success":         True,
         "column":          col,
@@ -1057,4 +1058,226 @@ async def harmonise_categories(payload: HarmonisePayload):
             f'into {len(set(payload.mapping.values()))} canonical form(s). '
             f'Unique values reduced from {original_uniques} to {new_uniques}.'
         ],
+    }
+
+
+# =============================================================================
+# TASK 1 UPGRADE C — AUTO HARMONISE
+#
+# POST /task1/auto_harmonise
+#      One-click fix — detects all variant groups internally and applies
+#      the most-frequent variant as the canonical form across every
+#      qualifying column, without the user constructing the mapping manually.
+#
+#      dry_run=true returns the mapping preview without writing anything.
+# =============================================================================
+
+class AutoHarmonisePayload(BaseModel):
+    """
+    Defines the JSON body for POST /task1/auto_harmonise.
+
+    columns:
+        Optional list of column names to restrict the auto-harmonise to.
+        If omitted (or empty), every qualifying column is processed.
+
+    dry_run:
+        When True, returns the mapping it WOULD apply but does NOT write
+        anything to the DataFrame. Use this for a confirmation preview.
+        Default is False — changes are applied immediately.
+
+    Example — apply to all qualifying columns:
+        {}
+
+    Example — apply to specific columns only:
+        {"columns": ["gender", "city", "country"]}
+
+    Example — preview without applying:
+        {"dry_run": true}
+    """
+    columns: Optional[List[str]] = None   # None = process all qualifying columns
+    dry_run: Optional[bool]      = False  # False = apply immediately
+
+
+@task1.post("/task1/auto_harmonise")
+async def auto_harmonise(payload: AutoHarmonisePayload):
+    """
+    Auto-applies canonical form mappings to every qualifying column
+    without requiring the user to manually construct the mapping dict.
+
+    How it works:
+        1. Internally runs the same detection logic as GET /task1/category_info
+           to find every column with variant groups.
+        2. For each problem group, uses the most-frequent variant as the
+           canonical form — identical to the suggested_canonical in category_info.
+        3. Builds a mapping dict for each column: variant → canonical.
+        4. Applies every mapping using the same .map() + .combine_first()
+           pattern as harmonise_categories.
+        5. Saves a single snapshot covering all changes, then writes back.
+
+    Why we re-run detection internally instead of accepting mappings:
+        Re-running detection is fast (read-only scan) and guarantees the
+        mappings reflect the current DataFrame state at the moment the fix
+        is applied — not a potentially stale earlier scan result.
+
+    dry_run mode:
+        When dry_run=True the function returns the full mapping it would
+        apply but skips the snapshot and dataset_state.df write.
+        This lets the frontend show a confirmation dialog before any
+        data is changed.
+    """
+    df      = require_df().copy()   # .copy() — never mutate live DataFrame until the end
+    applied = []                    # success messages — one per column changed
+    errors  = []                    # failure messages — one per column that errored
+
+    # ── Step 1: reproduce the category_info detection logic ───────────────────
+
+    # Select only text columns with low cardinality (under 50 unique values).
+    # Identical filter to get_category_info() so auto_harmonise operates on
+    # exactly the same set of columns the user saw in the scan report.
+    text_cols = df.select_dtypes(include=["object", "category"]).columns.tolist()
+
+    # If the user specified particular columns, restrict to those.
+    # Validate each one exists before doing any work.
+    if payload.columns:
+        missing_cols = [c for c in payload.columns if c not in df.columns]
+        if missing_cols:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Column(s) not found in dataset: {missing_cols}"
+            )
+        # Intersect with text_cols — silently skip non-text columns the user
+        # may have included by mistake rather than crashing on them
+        text_cols = [c for c in payload.columns if c in text_cols]
+
+    # ── Step 2: build the mapping for every qualifying column ─────────────────
+
+    # all_mappings stores the full plan: column → {variant: canonical, ...}
+    # Used for both dry_run reporting and actual application.
+    all_mappings: Dict[str, Dict[str, str]] = {}
+
+    for col in text_cols:
+        series = df[col].dropna().astype(str)
+
+        # Skip high-cardinality columns — same threshold as get_category_info()
+        if series.nunique() > 50:
+            continue
+
+        # Build variant groups: normalised_key → [list of original spellings]
+        # Normalised = lowercase + stripped so "Male" and " male" share one key
+        variant_groups: Dict[str, list] = {}
+        for val in series.unique():
+            normalised = val.strip().lower()
+            if normalised not in variant_groups:
+                variant_groups[normalised] = []
+            variant_groups[normalised].append(val)
+
+        # Only process groups that have more than one spelling variant
+        problem_groups = {
+            k: v for k, v in variant_groups.items()
+            if len(v) > 1
+        }
+
+        if not problem_groups:
+            continue   # column is already consistent — skip it
+
+        # For each problem group: find the most frequent variant and use it
+        # as the canonical form. All other variants in the group map to it.
+        col_mapping: Dict[str, str] = {}
+
+        for normalised, variants in problem_groups.items():
+            # Count occurrences of each variant in the full column
+            counts = {
+                v: int((series == v).sum())
+                for v in variants
+            }
+            # max() with a key function returns the variant with the highest count.
+            # This is the canonical — the form we keep, everything else maps to it.
+            canonical = max(counts, key=lambda k: counts.get(k, 0))
+
+            # Map every OTHER variant to the canonical.
+            # We don't map canonical → canonical because that is a no-op
+            # and would clutter the applied log with meaningless entries.
+            for variant in variants:
+                if variant != canonical:
+                    col_mapping[variant] = canonical
+
+        if col_mapping:
+            # Only include columns where at least one variant actually needs changing
+            all_mappings[col] = col_mapping
+
+    # ── Step 3: handle dry_run ────────────────────────────────────────────────
+
+    if payload.dry_run:
+        # Return the full plan without applying anything.
+        # The frontend uses this to show a confirmation dialog.
+        total_variants = sum(len(m) for m in all_mappings.values())
+        return {
+            "dry_run":               True,
+            "columns_affected":      len(all_mappings),
+            "total_variants_to_fix": total_variants,
+            "mapping_preview":       all_mappings,
+            "message": (
+                f"Dry run complete. {len(all_mappings)} column(s) would be harmonised, "
+                f"standardising {total_variants} variant(s). "
+                f"Send the same request with dry_run=false to apply."
+                if all_mappings else
+                "No variant groups found — all qualifying columns are already consistent."
+            ),
+        }
+
+    # ── Step 4: apply every mapping ───────────────────────────────────────────
+
+    if not all_mappings:
+        # Nothing to fix — return early with a friendly message
+        return {
+            "success":          True,
+            "columns_affected": 0,
+            "applied":          ["All qualifying columns are already consistent — nothing to harmonise."],
+            "errors":           [],
+            "new_shape":        list(df.shape),
+        }
+
+    for col, col_mapping in all_mappings.items():
+        try:
+            before_uniques = int(df[col].nunique())
+
+            # .map(col_mapping) replaces every value found in the mapping.
+            # For values NOT in the mapping, .map() returns NaN by default.
+            # .combine_first(df[col]) fills those NaN positions back with the
+            # original values — unmapped values are left completely untouched.
+            mapped  = df[col].map(col_mapping)
+            df[col] = mapped.combine_first(df[col])
+
+            after_uniques = int(df[col].nunique())
+            reduced_by    = before_uniques - after_uniques
+
+            applied.append(
+                f'"{col}": standardised {len(col_mapping)} variant(s) → '
+                f'{len(set(col_mapping.values()))} canonical form(s). '
+                f'Unique values reduced from {before_uniques} to {after_uniques}.'
+            )
+
+        except Exception as e:
+            # Catch per-column errors — one failure does not block the others
+            errors.append(f'"{col}": unexpected error — {str(e)}')
+
+    # ── Step 5: save and write back ───────────────────────────────────────────
+
+    if applied:
+        # One snapshot covers all columns changed in this single operation.
+        # One undo therefore rolls back ALL harmonisations at once —
+        # correct behaviour for a "one-click fix all" action.
+        snapshot_store.save(
+            f"Task 1 — auto harmonised {len(applied)} column(s)",
+            require_df()   # require_df() still returns the PRE-change df here
+        )
+        dataset_state.df = df   # write the cleaned DataFrame back to shared state
+
+    # auto_harmonise returns here — this is its ONLY return statement
+    return {
+        "success":          len(errors) == 0,
+        "columns_affected": len(applied),
+        "applied":          applied,
+        "errors":           errors,
+        "new_shape":        list(df.shape),
     }
