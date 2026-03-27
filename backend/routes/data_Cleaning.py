@@ -214,9 +214,9 @@ async def run_pipeline():
     # Run fifth. Skewness analysis is most meaningful after outliers have
     # been addressed — extreme outliers artificially inflate skewness scores
     # and can trigger false transform recommendations.
-    try:
-        results["task5_result"] = await get_skewness_info()
-    except Exception as e:
+    #try:
+       # results["task5_result"] = await get_skewness_info
+    #except Exception as e:
         results["task5_result"] = {
             "error": f"Task 5 scan failed: {str(e)}",
             "task":  "data_transformation"
