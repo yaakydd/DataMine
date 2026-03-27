@@ -147,12 +147,13 @@ async def upload_file(file: UploadFile = File(...)):
         # Write the loaded DataFrame to the shared singleton.
         # Every cleaning endpoint (task1 through task6) reads from this same object.
         # This is the moment the dataset becomes available to the rest of the app.
-        dataset_state.df = df
+        dataset_state.set_df(user_id, df)   # replaces dataset_state.df = df
+     
 
         # Clear all undo snapshots from any previous session.
         # Without this, the user could undo back to a state from a completely
         # different dataset — which would be confusing and dangerous.
-        snapshot_store.clear()
+        snapshot_store.clear(user_id)  
 
         # ── Build the metadata response ───────────────────────────────────────
 
