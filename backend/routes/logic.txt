@@ -41,7 +41,7 @@ Task 1:
 
 
 ** After **
-After all these preparations, the user would ne asked:
+After all these preparations, the user would be asked:
 1. Do you just want your cleaned dataset
 Output: Cleaned dataset plus a report on:
     - The structure of the dataset and the data cleaning methods which were applied and why it was applied
@@ -57,7 +57,4 @@ Output: CLeaned dataset plus data preprocessing steps for the model(including th
     2. The machine learning report
 
 
-
-
-What you built maps directly to what data professionals call the data cleaning pipeline or data wrangling pipeline. Every task you implemented has a formal name in the industry:
 Your TaskIndustry NameUsed ByTask 1 — Column consistencySchema normalisation / Data standardisationEvery data teamTask 2 — Missing dataImputation / Missing value treatmentStatistics, ML, BITask 3 — DuplicatesDeduplication / Record linkageData engineeringTask 4 — Outlier detectionAnomaly detection / Robust statisticsData science, MLTask 5 — TransformationsFeature engineering / NormalisationML, statistical modellingTask 6 — ValidationData quality rules / Schema validationData engineering, governance
